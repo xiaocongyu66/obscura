@@ -34,34 +34,29 @@ jobs:
           if-no-files-found: error
 
   build-android-aarch64:
-    name: Android aarch64 (Termux, musl-free glibc NDK)
+    name: Termux aarch64 (linux-gnu cross)
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install Rust + Android target
+      - name: Install Rust + aarch64 gnu target
         run: |
           rustup toolchain install stable --profile minimal
-          rustup target add aarch64-linux-android
-      - name: Install NDK
-        run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
-          unzip -q android-ndk-r27c-linux.zip
-          echo "ANDROID_NDK_HOME=$PWD/android-ndk-r27c" >> $GITHUB_ENV
-      - name: Build (stealth, android)
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+      - name: Build (stealth, aarch64 gnu)
         env:
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ github.workspace }}/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang
-          AR: ${{ github.workspace }}/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-          CC_aarch64_linux_android: ${{ github.workspace }}/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang
-          CXX_aarch64_linux_android: ${{ github.workspace }}/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang++
-        run: >
-          export PATH="$PWD/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" &&
-          cargo build --release --target aarch64-linux-android -p obscura-cli --features stealth
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: cargo build --release --target aarch64-unknown-linux-gnu -p obscura-cli --features stealth
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: obscura-android-aarch64
-          path: target/aarch64-linux-android/release/obscura
+          name: obscura-termux-aarch64
+          path: target/aarch64-unknown-linux-gnu/release/obscura
           if-no-files-found: error
