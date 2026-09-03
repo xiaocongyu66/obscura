@@ -20,3 +20,7 @@ pub use pdf::{RasterPdfError, RasterPdfOptions, RasterPdfPageRange};
 // Re-exported so the embeddable `obscura` crate (which depends on obscura-browser,
 // not obscura-js) can surface the interception channel types.
 pub use obscura_js::ops::{InterceptResolution, InterceptedRequest};
+pub mod fingerprint;
+pub mod cdp_hardening;
+pub mod behavior;
+pub mod proxy;

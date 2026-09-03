@@ -250,6 +250,9 @@ pub struct ObscuraState {
     /// The document's input stream for `document.write()`, created on the first call.
     /// Why the calls share one parser is in `write_stream`.
     pub(crate) write_stream: RefCell<Option<crate::write_stream::DocumentWriteStream>>,
+    /// Per-realm WebGL state: one GlContext per canvas that called
+    /// getContext('webgl'). Populated lazily on first WebGL use.
+    pub webgl: Option<WebGLState>,
 }
 
 /// A frame document waiting to be given a realm.
@@ -257,6 +260,17 @@ pub struct PendingFrame {
     pub frame_id: u32,
     pub url: String,
     pub html: String,
+    /// The frame document's own character encoding (WHATWG canonical name),
+    /// determined by the host when it fetched/decoded the document. Empty
+    /// means "inherit the parent's encoding".
+    pub encoding: String,
+    /// When set, `html` is empty and the host must load `url` through its own
+    /// network stack before building the realm. This is how a browser loads
+    /// iframe documents: the frame's document request is a plain navigation
+    /// (cookies included, Sec-Fetch-Dest: iframe) with no CORS check on the
+    /// response — a JS-side `fetch()` cannot do it (opaque responses hide the
+    /// body, which would hand every cross-origin frame an empty document).
+    pub needs_host_fetch: bool,
     pub viewport_width: u64,
     pub viewport_height: u64,
     /// The frame that holds this one; 0 when the page does.
@@ -350,6 +364,7 @@ impl ObscuraState {
             import_map: Rc::new(RefCell::new(ImportMap::default())),
             already_started_scripts: RefCell::new(HashSet::new()),
             write_stream: RefCell::new(None),
+            webgl: None,
         }
     }
 }
@@ -1032,13 +1047,13 @@ fn op_script_try_start(state: &OpState, nid: u32) -> bool {
 /// tree. Layout intentionally remains unaware of the detached root until
 /// scoped style, slot assignment, and composed-tree paint are implemented.
 #[op2(fast)]
-fn op_shadow_attach(state: &OpState, host_nid: u32, #[string] mode: String) -> i32 {
+fn op_shadow_attach(state: &OpState, host_nid: u32, #[string] mode: String, frame_id: u32) -> i32 {
     let mode = match mode.as_str() {
         "open" => ShadowRootMode::Open,
         "closed" => ShadowRootMode::Closed,
         _ => return -1,
     };
-    let shared = state.borrow::<SharedState>().clone();
+    let shared = frame_state(state, frame_id);
     let state = shared.borrow();
     let Some(dom) = state.dom.as_ref() else {
         return -1;
@@ -1055,8 +1070,8 @@ fn op_shadow_attach(state: &OpState, host_nid: u32, #[string] mode: String) -> i
 /// visibility in bootstrap.js.
 #[op2]
 #[string]
-fn op_shadow_root_info(state: &OpState, host_nid: u32) -> String {
-    let shared = state.borrow::<SharedState>().clone();
+fn op_shadow_root_info(state: &OpState, host_nid: u32, frame_id: u32) -> String {
+    let shared = frame_state(state, frame_id);
     let state = shared.borrow();
     let Some(dom) = state.dom.as_ref() else {
         return String::new();
@@ -1296,18 +1311,22 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                 .unwrap_or_default();
             serde_json::to_string(&title).unwrap_or("\"\"".into())
         }
-        "document_url" => serde_json::to_string(&gs.url).unwrap_or("\"\"".into()),
+        "document_url" => {
+            // :target 匹配需要 DomTree 知道文档 URL(取 fragment)。
+            // 每次访问都同步一次(frame realm 的 dom 是独立实例,gs.url 是
+            // 该 realm 自己的 URL)。
+            dom.set_document_url(&gs.url);
+            serde_json::to_string(&gs.url).unwrap_or("\"\"".into())
+        }
         "document_referrer" => serde_json::to_string(&gs.referrer).unwrap_or("\"\"".into()),
         "document_encoding" => serde_json::to_string(&gs.encoding).unwrap_or("\"UTF-8\"".into()),
         "document_element" => {
+            // Per DOM spec: documentElement is the first Element child
+            // of the document, regardless of tag name. HTML documents
+            // have <html>, but XML documents can have any root element.
             for cid in dom.children(dom.document()) {
-                if let Some(n) = dom.get_node(cid) {
-                    if n.as_element()
-                        .map(|name| name.local.as_ref() == "html")
-                        .unwrap_or(false)
-                    {
-                        return cid.index().to_string();
-                    }
+                if dom.get_node(cid).is_some_and(|n| n.is_element()) {
+                    return cid.index().to_string();
                 }
             }
             "-1".into()
@@ -1334,6 +1353,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
             "null".into()
         }
         "get_element_by_id" => {
+            if arg1.is_empty() { return "-1".into(); }
             // Verify the indexed node is in the live document. The id_index is best-effort:
             // it only registers nodes at creation time and doesn't update on reparent, so
             // it can point to a detached clone while the live node is elsewhere in the tree.
@@ -1356,12 +1376,13 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                 }
             }
         }
-        "query_selector" => dom
-            .query_selector(&arg1)
-            .ok()
-            .flatten()
-            .map(|id| id.index().to_string())
-            .unwrap_or("-1".into()),
+        "query_selector" => {
+            match dom.query_selector(&arg1) {
+                Ok(Some(id)) => id.index().to_string(),
+                Ok(None) => "-1".into(),
+                Err(e) => format!("!SYNTAX_ERR:{}", e),
+            }
+        }
         "query_selector_all" => {
             let ids: Vec<i32> = dom
                 .query_selector_all(&arg1)
@@ -1372,26 +1393,44 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
         }
         "query_selector_scoped" => {
             let root_nid = arg1.parse::<u32>().unwrap_or(0);
-            dom.query_selector_from(NodeId::new(root_nid), &arg2)
-                .ok()
-                .flatten()
-                .map(|id| id.index().to_string())
-                .unwrap_or("-1".into())
+            match dom.query_selector_from(NodeId::new(root_nid), &arg2) {
+                Ok(Some(id)) => id.index().to_string(),
+                Ok(None) => "-1".into(),
+                Err(e) => format!("!SYNTAX_ERR:{}", e),
+            }
         }
         "query_selector_all_scoped" => {
             let root_nid = arg1.parse::<u32>().unwrap_or(0);
-            let ids: Vec<i32> = dom
-                .query_selector_all_from(NodeId::new(root_nid), &arg2)
-                .ok()
-                .map(|ids| ids.iter().map(|id| id.index() as i32).collect())
-                .unwrap_or_default();
+            let ids: Vec<i32> = match dom.query_selector_all_from(NodeId::new(root_nid), &arg2) {
+                Ok(ids) => ids.iter().map(|id| id.index() as i32).collect(),
+                Err(e) => return format!("!SYNTAX_ERR:{}", e),
+            };
             serde_json::to_string(&ids).unwrap_or("[]".into())
+        }
+        // closest 的固定 scope 匹配:arg1 = 被测 nid,arg2 = "scope\0selector"
+        "matches_with_scope" => {
+            let nid = match arg1.parse::<u32>() {
+                Ok(n) => n,
+                Err(_) => return "false".into(),
+            };
+            let (scope, selector) = arg2.split_once('\0').unwrap_or(("", arg2.as_str()));
+            let scope = scope.parse::<u32>().ok();
+            dom.matches_selector_scoped(NodeId::new(nid), scope.map(NodeId::new), selector)
+                .unwrap_or(false)
+                .to_string()
         }
         "matches_selector" => {
             let nid = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
             dom.matches_selector(nid, &arg2)
                 .unwrap_or(false)
                 .to_string()
+        }
+        // JS wrapper cache 身份校验:nid 复用后 generation 变化,旧 wrapper
+        // 必须失效(Next.js 水合曾收到跨 slot 的僵尸 select wrapper)。
+        "node_generation" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let gen = dom.with_node(NodeId::new(nid), |n| n.generation);
+            serde_json::to_string(&gen.unwrap_or(u32::MAX)).unwrap_or("\"0\"".into())
         }
         "node_type" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
@@ -1411,7 +1450,31 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
             let name: String = dom
                 .with_node(NodeId::new(nid), |n| match &n.data {
                     NodeData::Document => "#document".to_string(),
-                    NodeData::Element { name, .. } => name.local.as_ref().to_ascii_uppercase(),
+                    NodeData::Element { name, .. } => {
+                        // DOM spec:nodeName = qualified name(prefix:local),
+                        // HTML ns 元素 ASCII 大写,其它 ns 原样。
+                        match name.prefix {
+                            Some(ref p) => {
+                                let mut qn = p.as_ref().to_string();
+                                qn.push(':');
+                                let is_html = name.ns.as_ref() == "http://www.w3.org/1999/xhtml";
+                                if is_html {
+                                    qn.push_str(&name.local.as_ref().to_ascii_uppercase());
+                                } else {
+                                    qn.push_str(name.local.as_ref());
+                                }
+                                qn
+                            }
+                            None => {
+                                let is_html = name.ns.as_ref() == "http://www.w3.org/1999/xhtml";
+                                if is_html {
+                                    name.local.as_ref().to_ascii_uppercase()
+                                } else {
+                                    name.local.as_ref().to_string()
+                                }
+                            }
+                        }
+                    }
                     NodeData::Text { .. } => "#text".to_string(),
                     NodeData::Comment { .. } => "#comment".to_string(),
                     NodeData::Doctype { name, .. } => name.clone(),
@@ -1477,12 +1540,28 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
             let name = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.as_element().map(|name| {
-                        if name.ns == html5ever::ns!(html) {
-                            name.local.as_ref().to_ascii_uppercase()
-                        } else {
-                            match &name.prefix {
-                                Some(prefix) => format!("{}:{}", prefix, name.local),
-                                None => name.local.to_string(),
+                        // qualified 名:prefix:local(spec —— HTML ns 元素的
+                        // qualified 名整体 ASCII 大写,含 prefix:
+                        // createElementNS(xhtml,'foo:div').tagName === "FOO:DIV",
+                        // WPT Node-cloneNode 断言)
+                        match &name.prefix {
+                            Some(prefix) => {
+                                if name.ns == html5ever::ns!(html) {
+                                    format!(
+                                        "{}:{}",
+                                        prefix.as_ref().to_ascii_uppercase(),
+                                        name.local.as_ref().to_ascii_uppercase()
+                                    )
+                                } else {
+                                    format!("{}:{}", prefix, name.local)
+                                }
+                            }
+                            None => {
+                                if name.ns == html5ever::ns!(html) {
+                                    name.local.as_ref().to_ascii_uppercase()
+                                } else {
+                                    name.local.to_string()
+                                }
                             }
                         }
                     })
@@ -1559,9 +1638,6 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
             serde_json::to_string(&dom.outer_html(NodeId::new(nid))).unwrap_or("\"\"".into())
         }
         "append_child" => {
-            // Reject if either nid failed to parse (was "undefined"/empty) — those
-            // default to 0 which is the document root, and silently operating on it
-            // corrupts the tree. Require both args to be valid positive integers.
             let parent = match arg1.parse::<u32>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
@@ -1604,11 +1680,34 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
         }
         "remove_attribute" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
-            dom.with_node_mut(NodeId::new(nid), |n| {
-                if let NodeData::Element { attrs, .. } = &mut n.data {
-                    attrs.retain(|a| !a.qualified_name_eq(&arg2));
-                }
-            });
+            let node_id = NodeId::new(nid);
+            // If removing the id attribute, update the id index.
+            if arg2 == "id" {
+                let old_id = dom
+                    .with_node(node_id, |n| n.get_attribute("id").map(|s| s.to_string()))
+                    .flatten();
+                dom.with_node_mut(node_id, |n| {
+                    if let NodeData::Element { attrs, .. } = &mut n.data {
+                        // spec:removeAttribute 只删**第一个**限定名匹配的
+                        // 属性(irrespective of namespace)—— 同名不同 ns 的
+                        // 其余保留(WPT Element-removeAttribute)。
+                        if let Some(pos) = attrs.iter().position(|a| a.qualified_name_eq(&arg2)) {
+                            attrs.remove(pos);
+                        }
+                    }
+                });
+                dom.update_id_index(node_id, old_id.as_deref(), None);
+            } else {
+                dom.with_node_mut(node_id, |n| {
+                    if let NodeData::Element { attrs, .. } = &mut n.data {
+                        // spec:只删第一个限定名匹配的属性(同 ns 删除由
+                        // remove_attribute_ns 负责;同名不同 ns 的保留)。
+                        if let Some(pos) = attrs.iter().position(|a| a.qualified_name_eq(&arg2)) {
+                            attrs.remove(pos);
+                        }
+                    }
+                });
+            }
             "true".into()
         }
         // Namespace-aware attribute ops. arg2 packs the pieces with a NUL:
@@ -1789,6 +1888,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                 .unwrap_or("-1".into())
         }
         "create_document_fragment" => dom.new_node(NodeData::Document).index().to_string(),
+        "create_document" => dom.new_node(NodeData::Document).index().to_string(),
         "clone_node" => {
             let nid = match arg1.parse::<u32>() {
                 Ok(n) => n,
@@ -1860,13 +1960,17 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
             .to_string()
         }
         "create_doctype" => {
-            // arg1 = name, arg2 = public_id. system_id stored only in the
-            // JS wrapper since neither current WPT test reads it back from
-            // the underlying tree.
+            // arg1 = name,arg2 = "public_id\0system_id"(cloneNode 的副本要从
+            // 树里恢复 systemId,WPT implementation.createDocumentType 的
+            // check_copy 断言依赖)。
+            let (public_id, system_id) = match arg2.split_once('\0') {
+                Some((pub_id, sys_id)) => (pub_id.to_string(), sys_id.to_string()),
+                None => (arg2.clone(), String::new()),
+            };
             dom.new_node(NodeData::Doctype {
                 name: arg1.clone(),
-                public_id: arg2.clone(),
-                system_id: String::new(),
+                public_id,
+                system_id,
             })
             .index()
             .to_string()
@@ -1881,6 +1985,14 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                 .flatten()
                 .unwrap_or_default();
             serde_json::to_string(&val).unwrap_or("\"\"".into())
+        }
+        "doctype_system_id" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let sid = dom.with_node(NodeId::new(nid), |n| match &n.data {
+                NodeData::Doctype { system_id, .. } => system_id.clone(),
+                _ => String::new(),
+            });
+            serde_json::to_string(&sid.unwrap_or_default()).unwrap_or("\"\"".into())
         }
         "doctype_name" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
@@ -1923,9 +2035,11 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
         "contains" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
             let other = arg2.parse::<u32>().unwrap_or(0);
-            dom.descendants(NodeId::new(nid))
-                .contains(&NodeId::new(other))
-                .to_string()
+            // DOM spec:contains 的语义是 inclusive descendant —— 节点包含
+            // 自身(descendants 只走子树,不含起点)。
+            (nid == other
+                || dom.descendants(NodeId::new(nid)).contains(&NodeId::new(other)))
+            .to_string()
         }
         // Connectivity is maintained incrementally by DomTree. Exposing the
         // cached bit avoids an ancestor op crossing for every level when JS
@@ -2793,14 +2907,28 @@ async fn stealth_fetch_all(
         }
 
         let credentials_allowed = credentials.allows(&page_origin, &current_url);
+        // Fetch spec:sec-fetch-site 按请求发起方 origin 与目标推导。
+        let fetch_site = match url::Url::parse(&page_origin) {
+            Ok(origin_url) if origin_url.origin() == parsed_current.origin() => "same-origin",
+            Ok(_) => "cross-site",
+            Err(_) => "none",
+        };
+        let fetch_accept = req_headers
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case("accept"))
+            .and_then(|k| req_headers.get(k))
+            .cloned()
+            .unwrap_or_default();
         let r = stealth
-            .send_single(
+            .send_single_for_request(
                 &current_method,
                 &parsed_current,
                 &req_headers,
                 &current_body,
                 credentials_allowed,
                 credentials_allowed,
+                fetch_site,
+                &fetch_accept,
             )
             .await
             .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?;
@@ -3627,6 +3755,54 @@ fn op_frame_document_ready(
         frame_id,
         url: url.to_string(),
         html: html.to_string(),
+        encoding: String::new(),
+        needs_host_fetch: false,
+        viewport_width,
+        viewport_height,
+        parent_frame_id,
+    });
+    frame_id
+}
+
+/// `op_frame_navigate(url, width, height)`:iframe 导航的标准路径。
+/// html 留空 + needs_host_fetch=true,由宿主网络栈加载 URL 后再建 realm
+/// (iframe 文档请求是普通导航:带 cookies、无 CORS 响应检查——JS 的
+/// fetch(mode:'no-cors') 拿到的 opaque body 是空的,跨域 frame 会拿到
+/// 空文档,这是 CF 挑战等跨域 iframe 拿不到内容的原因)。
+#[op2(fast)]
+fn op_frame_navigate(
+    scope: &mut v8::HandleScope,
+    state: &OpState,
+    #[string] url: &str,
+    #[number] viewport_width: u64,
+    #[number] viewport_height: u64,
+) -> u32 {
+    let parent_frame_id = realm_state(scope, state).borrow().frame_id;
+    let gs = state.borrow::<SharedState>().clone();
+    let mut gs = gs.borrow_mut();
+    let bytes = url.len();
+    if gs.pending_frames.len() >= MAX_PENDING_FRAME_DOCUMENTS
+        || gs.pending_frame_bytes.saturating_add(bytes) > MAX_PENDING_FRAME_BYTES
+    {
+        tracing::warn!(
+            "dropping frame navigation: {} pending documents, {} bytes",
+            gs.pending_frames.len(),
+            gs.pending_frame_bytes,
+        );
+        return 0;
+    }
+    let Some(frame_id) = gs.frame_id_counter.checked_add(1) else {
+        tracing::warn!("frame id space exhausted");
+        return 0;
+    };
+    gs.frame_id_counter = frame_id;
+    gs.pending_frame_bytes = gs.pending_frame_bytes.saturating_add(bytes);
+    gs.pending_frames.push(PendingFrame {
+        frame_id,
+        url: url.to_string(),
+        html: String::new(),
+        encoding: String::new(),
+        needs_host_fetch: true,
         viewport_width,
         viewport_height,
         parent_frame_id,
@@ -3653,6 +3829,7 @@ fn op_async_runtime_available() -> bool {
 /// delivery; this op supplies only the event-loop wake boundary.
 #[op2(async)]
 async fn op_posted_task() {
+    tracing::debug!("op_posted_task: wake requested");
     tokio::task::yield_now().await;
 }
 
@@ -4376,6 +4553,61 @@ fn op_canvas_paint_damage(state: &OpState, nid: u32) -> bool {
     connected
 }
 
+// ─── Live collection ops ─────────────────────────────────────────────────────
+//
+// These ops query the DOM tree on every call, returning the current set
+// of matching node IDs. The JS side uses them in a Proxy that re-queries
+// on every .length / [i] access, making the collection "live" without
+// maintaining a registration table. This is the fastrender approach:
+// no mutation tracking, just always-fresh queries.
+
+#[op2]
+#[string]
+fn op_get_elements_by_tag_name(state: &OpState, root_nid: u32, #[string] tag: String, frame_id: u32) -> String {
+    let shared = frame_state(state, frame_id);
+    let gs = shared.borrow();
+    let Some(dom) = gs.dom.as_ref() else {
+        return "[]".into();
+    };
+    let lower = tag.to_ascii_lowercase();
+    let ids: Vec<u32> = dom
+        .descendants(dom.document())
+        .into_iter()
+        .filter(|nid| {
+            dom.with_node(*nid, |n| {
+                n.is_element() && n.as_element()
+                    .is_some_and(|name| name.local.as_ref() == lower)
+            }).unwrap_or(false)
+        })
+        .map(|nid| nid.index() as u32)
+        .collect();
+    serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into())
+}
+
+#[op2]
+#[string]
+fn op_get_elements_by_tag_name_scoped(state: &OpState, root_nid: u32, #[string] tag: String, frame_id: u32) -> String {
+    let shared = frame_state(state, frame_id);
+    let gs = shared.borrow();
+    let Some(dom) = gs.dom.as_ref() else {
+        return "[]".into();
+    };
+    let lower = tag.to_ascii_lowercase();
+    let match_all = lower == "*";
+    let descendants = dom.descendants(NodeId::new(root_nid));
+    let ids: Vec<u32> = descendants
+        .into_iter()
+        .filter(|nid| {
+            dom.with_node(*nid, |n| {
+                n.is_element() && (match_all || n.as_element()
+                    .is_some_and(|name| name.local.as_ref() == lower))
+            }).unwrap_or(false)
+        })
+        .map(|nid| nid.index() as u32)
+        .collect();
+    serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into())
+}
+
 pub fn build_extension() -> Extension {
     let mut ops = vec![
         op_dom(),
@@ -4389,6 +4621,7 @@ pub fn build_extension() -> Extension {
         op_set_cookie(),
         op_navigate(),
         op_frame_document_ready(),
+        op_frame_navigate(),
         op_post_frame_message(),
         op_sleep(),
         op_async_runtime_available(),
@@ -4410,9 +4643,37 @@ pub fn build_extension() -> Extension {
         op_encoding_for_label(),
         op_text_decode(),
         op_url_encode_query(),
+        // Live collection ops — query DOM on every call for "live" behavior.
+        op_get_elements_by_tag_name(),
+        op_get_elements_by_tag_name_scoped(),
+        // WebGL ops — always available (pure Rust, no system GL).
+        op_webgl_create_context(),
+        op_webgl_delete_context(),
+        op_webgl_viewport(),
+        op_webgl_clear_color(),
+        op_webgl_clear(),
+        op_webgl_create_buffer(),
+        op_webgl_bind_buffer(),
+        op_webgl_buffer_data(),
+        op_webgl_create_texture(),
+        op_webgl_bind_texture(),
+        op_webgl_create_shader(),
+        op_webgl_shader_source(),
+        op_webgl_compile_shader(),
+        op_webgl_create_program(),
+        op_webgl_attach_shader(),
+        op_webgl_link_program(),
+        op_webgl_use_program(),
+        op_webgl_draw_arrays(),
+        op_webgl_get_parameter(),
+        op_webgl_get_error(),
     ];
     // Only registered when the render feature is compiled in. bootstrap.js
     // probes with typeof before calling, so the op's absence is a clean fallback.
+    // Media container metadata:独立于 render(视频/音频的 DOM 可观测属性)
+    ops.push(op_media_metadata());
+    // Image header probing:独立于 render(naturalWidth/Height 零渲染依赖)
+    ops.push(op_image_size_for_element());
     #[cfg(feature = "render")]
     {
         ops.push(op_begin_render_task());
@@ -5602,4 +5863,954 @@ fn op_scroll_to(state: &OpState, x: f64, y: f64) -> String {
     sample_live_document_animations(&mut gs);
     let (x, y) = clamp_scroll_offset_for_geometry(&mut gs, (x as f32, y as f32));
     format!("{{\"x\":{},\"y\":{}}}", x, y)
+}
+
+// ─── WebGL ops ──────────────────────────────────────────────────────────────
+//
+// Each canvas that calls getContext('webgl') gets a PortableGL GlContext
+// stored in WebGLState (per-realm). The JS side calls these ops for every
+// gl.* method. Shader source is compiled via the GLSL crate + our
+// interpreter; the interpreter is wired into PortableGL via trampolines.
+
+use obscura_webgl::gl_context::GlContext;
+
+pub struct WebGLState {
+    /// One GlContext per canvas (keyed by canvas nid).
+    contexts: std::collections::HashMap<u32, GlContext>,
+    /// Shader source storage (shader_id → GLSL source). PortableGL uses
+    /// function-pointer shaders, so we store GLSL here and compile it to
+    /// bytecode at link time, wiring the trampolines into pgl_create_program.
+    shader_sources: std::collections::HashMap<u32, String>,
+    /// Program → (vertex_shader_id, fragment_shader_id).
+    program_shaders: std::collections::HashMap<u32, (u32, u32)>,
+    /// Program → (vertex_interpreter, fragment_interpreter). Populated at
+    /// link time. The trampolines look these up via thread-local before
+    /// each draw call.
+    interpreters: std::collections::HashMap<u32, (
+        obscura_webgl::glsl::Interpreter,
+        obscura_webgl::glsl::Interpreter,
+    )>,
+    /// Webgl program id → PortableGL program id. The PortableGL program
+    /// holds the trampoline function pointers; when use_program is called,
+    /// we look up the corresponding PortableGL program and activate it.
+    program_pgl: std::collections::HashMap<u32, u32>,
+    /// Current active program (for drawArrays to know which interpreter
+    /// to swap into the thread-local).
+    current_program: u32,
+    /// Next shader/program id counter.
+    next_id: u32,
+}
+
+impl WebGLState {
+    pub fn new() -> Self {
+        Self {
+            contexts: std::collections::HashMap::new(),
+            shader_sources: std::collections::HashMap::new(),
+            program_shaders: std::collections::HashMap::new(),
+            interpreters: std::collections::HashMap::new(),
+            program_pgl: std::collections::HashMap::new(),
+            current_program: 0,
+            next_id: 1,
+        }
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_create_context(state: &OpState, canvas_nid: u32, width: i32, height: i32) -> bool {
+    // Rust WebGL backend (PortableGL + GLSL interpreter). Creates a real
+    // GlContext that can do software rendering. Enabled by the
+    // `--webgl-rust` CLI flag. When disabled (default), returns false and
+    // the JS stub handles WebGL (sufficient for fingerprinting probes).
+    if !crate::webgl_rust_backend_enabled() {
+        return false;
+    }
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if gs.webgl.is_none() {
+        gs.webgl = Some(WebGLState::new());
+    }
+    let webgl = gs.webgl.as_mut().unwrap();
+    if webgl.contexts.contains_key(&canvas_nid) {
+        return true;
+    }
+    let mut ctx = GlContext::new();
+    let _ = ctx.init(width.max(1), height.max(1));
+    webgl.contexts.insert(canvas_nid, ctx);
+    true
+}
+
+#[op2(fast)]
+fn op_webgl_delete_context(state: &OpState, canvas_nid: u32) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(webgl) = gs.webgl.as_mut() {
+        webgl.contexts.remove(&canvas_nid);
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_viewport(state: &OpState, canvas_nid: u32, x: i32, y: i32, w: i32, h: i32) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(ctx) = gs.webgl.as_mut().and_then(|w| w.contexts.get_mut(&canvas_nid)) {
+        ctx.gl_viewport(x, y, w, h);
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_clear_color(state: &OpState, canvas_nid: u32, r: f32, g: f32, b: f32, a: f32) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(ctx) = gs.webgl.as_mut().and_then(|w| w.contexts.get_mut(&canvas_nid)) {
+        ctx.gl_clear_color(r, g, b, a);
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_clear(state: &OpState, canvas_nid: u32, mask: u32) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(ctx) = gs.webgl.as_mut().and_then(|w| w.contexts.get_mut(&canvas_nid)) {
+        ctx.gl_clear(mask);
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_create_buffer(state: &OpState, canvas_nid: u32) -> u32 {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(ctx) = gs.webgl.as_mut().and_then(|w| w.contexts.get_mut(&canvas_nid)) {
+        let bufs = ctx.gl_gen_buffers(1);
+        return bufs.first().copied().unwrap_or(0);
+    }
+    0
+}
+
+#[op2(fast)]
+fn op_webgl_bind_buffer(state: &OpState, canvas_nid: u32, target: u32, buffer: u32) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(ctx) = gs.webgl.as_mut().and_then(|w| w.contexts.get_mut(&canvas_nid)) {
+        let _ = ctx.gl_bind_buffer(target, buffer);
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_buffer_data(state: &OpState, canvas_nid: u32, target: u32, #[buffer] data: &[u8], usage: u32) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(ctx) = gs.webgl.as_mut().and_then(|w| w.contexts.get_mut(&canvas_nid)) {
+        let _ = ctx.gl_buffer_data(target, data, usage);
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_create_texture(state: &OpState, canvas_nid: u32) -> u32 {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(ctx) = gs.webgl.as_mut().and_then(|w| w.contexts.get_mut(&canvas_nid)) {
+        let texs = ctx.gl_gen_textures(1);
+        return texs.first().copied().unwrap_or(0);
+    }
+    0
+}
+
+#[op2(fast)]
+fn op_webgl_bind_texture(state: &OpState, canvas_nid: u32, target: u32, texture: u32) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(ctx) = gs.webgl.as_mut().and_then(|w| w.contexts.get_mut(&canvas_nid)) {
+        let _ = ctx.gl_bind_texture(target, texture);
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_create_shader(state: &OpState, canvas_nid: u32, _shader_type: u32) -> u32 {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    let id = if let Some(webgl) = gs.webgl.as_mut() {
+        let id = webgl.next_id;
+        webgl.next_id += 1;
+        webgl.shader_sources.insert(id, String::new());
+        id
+    } else { 0 };
+    id
+}
+
+#[op2(fast)]
+fn op_webgl_shader_source(state: &OpState, canvas_nid: u32, shader: u32, #[string] source: String) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(webgl) = gs.webgl.as_mut() {
+        webgl.shader_sources.insert(shader, source);
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_compile_shader(state: &OpState, canvas_nid: u32, _shader: u32) {
+    // Compilation happens at link time (when both shaders are attached).
+}
+
+#[op2(fast)]
+fn op_webgl_create_program(state: &OpState, canvas_nid: u32) -> u32 {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(webgl) = gs.webgl.as_mut() {
+        let id = webgl.next_id;
+        webgl.next_id += 1;
+        webgl.program_shaders.insert(id, (0, 0));
+        return id;
+    }
+    0
+}
+
+#[op2(fast)]
+fn op_webgl_attach_shader(state: &OpState, canvas_nid: u32, program: u32, shader: u32) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(webgl) = gs.webgl.as_mut() {
+        if let Some(pair) = webgl.program_shaders.get_mut(&program) {
+            // Determine if this is vertex or fragment from the stored source.
+            if let Some(src) = webgl.shader_sources.get(&shader) {
+                let is_fragment = src.contains("gl_FragColor") || src.contains("gl_FragCoord");
+                if is_fragment {
+                    pair.1 = shader;
+                } else {
+                    pair.0 = shader;
+                }
+            }
+        }
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_link_program(state: &OpState, canvas_nid: u32, program: u32) {
+    // Link: compile GLSL → bytecode, wire trampolines via pgl_create_program.
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    let (vs_src, fs_src) = {
+        let webgl = match gs.webgl.as_mut() {
+            Some(w) => w,
+            None => return,
+        };
+        let pair = match webgl.program_shaders.get(&program) {
+            Some(p) => *p,
+            None => return,
+        };
+        let vs = webgl.shader_sources.get(&pair.0).cloned().unwrap_or_default();
+        let fs = webgl.shader_sources.get(&pair.1).cloned().unwrap_or_default();
+        (vs, fs)
+    };
+    // Parse + compile GLSL.
+    let vs_ast = match obscura_webgl::glsl::parse_glsl(&vs_src, obscura_webgl::glsl::ast::ShaderStage::Vertex) {
+        Ok(ast) => ast,
+        Err(_e) => return,
+    };
+    let fs_ast = match obscura_webgl::glsl::parse_glsl(&fs_src, obscura_webgl::glsl::ast::ShaderStage::Fragment) {
+        Ok(ast) => ast,
+        Err(_e) => return,
+    };
+    let vs_prog = obscura_webgl::glsl::compile_shader(&vs_ast);
+    let fs_prog = obscura_webgl::glsl::compile_shader(&fs_ast);
+    let vs_interp = obscura_webgl::glsl::Interpreter::new(vs_prog);
+    let fs_interp = obscura_webgl::glsl::Interpreter::new(fs_prog);
+    // Wire trampolines via pgl_create_program.
+    if let Some(webgl) = gs.webgl.as_mut() {
+        if let Some(ctx) = webgl.contexts.get_mut(&canvas_nid) {
+            // Create a PortableGL program with our trampolines. The
+            // trampolines look up the interpreter via thread-local storage
+            // (set in op_webgl_draw_arrays before the draw call).
+            let pgl_program = ctx.pgl_create_program(
+                obscura_webgl::glsl::trampoline::vertex_trampoline,
+                obscura_webgl::glsl::trampoline::fragment_trampoline,
+                0,  // vs_output_size — will be set correctly when varyings are counted
+                &[],
+                false,
+            );
+            // Store the mapping: webgl program id → portablegl program id.
+            webgl.program_pgl.insert(program, pgl_program);
+            webgl.interpreters.insert(program, (vs_interp, fs_interp));
+        }
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_use_program(state: &OpState, canvas_nid: u32, program: u32) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    let webgl = match gs.webgl.as_mut() {
+        Some(w) => w,
+        None => return,
+    };
+    // Look up the PortableGL program id that was created at link time.
+    let pgl_program = webgl.program_pgl.get(&program).copied().unwrap_or(program);
+    webgl.current_program = program;
+    if let Some(ctx) = webgl.contexts.get_mut(&canvas_nid) {
+        ctx.gl_use_program(pgl_program);
+    }
+}
+
+#[op2(fast)]
+fn op_webgl_draw_arrays(state: &OpState, canvas_nid: u32, mode: u32, first: i32, count: i32) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    let webgl = match gs.webgl.as_mut() {
+        Some(w) => w,
+        None => return,
+    };
+    let cur_prog = webgl.current_program;
+    // Swap the current program's interpreters into the thread-local so
+    // the trampolines can find them. The vertex trampoline reads
+    // CURRENT_VERTEX_INTERPRETER; the fragment trampoline reads
+    // CURRENT_FRAGMENT_INTERPRETER.
+    let interp_ptrs = webgl.interpreters.get_mut(&cur_prog).map(|(vs, fs)| {
+        (vs as *mut _, fs as *mut _)
+    });
+    if let Some((vs_ptr, fs_ptr)) = interp_ptrs {
+        // Safety: the interpreter pointers are valid for the duration of
+        // this draw call. They live in WebGLState which outlives the call.
+        unsafe {
+            obscura_webgl::glsl::trampoline::set_vertex_interpreter(vs_ptr);
+            obscura_webgl::glsl::trampoline::set_fragment_interpreter(fs_ptr);
+        }
+    }
+    if let Some(ctx) = webgl.contexts.get_mut(&canvas_nid) {
+        ctx.gl_draw_arrays(mode, first, count);
+    }
+    // Clear the thread-locals after the draw.
+    obscura_webgl::glsl::trampoline::clear_interpreters();
+}
+
+#[op2(fast)]
+fn op_webgl_get_parameter(state: &OpState, canvas_nid: u32, pname: u32) -> u32 {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(ctx) = gs.webgl.as_mut().and_then(|w| w.contexts.get_mut(&canvas_nid)) {
+        if let Some(val) = ctx.gl_get_integerv(pname) {
+            return val.first().copied().unwrap_or(0) as u32;
+        }
+    }
+    0
+}
+
+#[op2(fast)]
+fn op_webgl_get_error(state: &OpState, canvas_nid: u32) -> u32 {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut gs = shared.borrow_mut();
+    if let Some(ctx) = gs.webgl.as_mut().and_then(|w| w.contexts.get_mut(&canvas_nid)) {
+        return ctx.gl_get_error();
+    }
+    0
+}
+
+
+// ---- Media container metadata (video/audio) --------------------------------
+// 无解码器依赖的纯容器解析:从字节流读出 duration/宽高/编解码名,
+// 供 HTMLMediaElement 的 readyState/duration/videoWidth 等可观测属性使用。
+// 支持:MP4(moov/mvhd+tkhd)、WebM/MKV(EBML Info+Track)、AVI(avih)、
+// MP3(MPEG 帧头)、WAV(fmt)、FLAC(STREAMINFO)、OGG(ID header)。
+
+fn be_u32(b: &[u8], off: usize) -> Option<u32> {
+    Some(u32::from_be_bytes([
+        *b.get(off)?,
+        *b.get(off + 1)?,
+        *b.get(off + 2)?,
+        *b.get(off + 3)?,
+    ]))
+}
+fn le_u32(b: &[u8], off: usize) -> Option<u32> {
+    Some(u32::from_le_bytes([
+        *b.get(off)?,
+        *b.get(off + 1)?,
+        *b.get(off + 2)?,
+        *b.get(off + 3)?,
+    ]))
+}
+fn be_u64(b: &[u8], off: usize) -> Option<u64> {
+    let mut arr = [0u8; 8];
+    for (i, item) in arr.iter_mut().enumerate() {
+        *item = *b.get(off + i)?;
+    }
+    Some(u64::from_be_bytes(arr))
+}
+
+struct MediaMeta {
+    duration_secs: f64,
+    width: u32,
+    height: u32,
+    kind: &'static str,
+}
+
+/// MP4:递归走 box 树。mvhd 给 duration,trak/tkhd 给宽高。
+fn mp4_walk_boxes(b: &[u8], start: usize, end: usize, depth: u32) -> (Option<f64>, Option<(u32, u32)>) {
+    let mut duration = None;
+    let mut dims = None;
+    let mut off = start;
+    while off + 8 <= end && depth < 8 {
+        let size32 = be_u32(b, off).unwrap_or(0) as usize;
+        let ty: &[u8] = b.get(off + 4..off + 8).unwrap_or(b"");
+        let (header, body_start, body_end) = if size32 == 1 {
+            let big = be_u64(b, off + 8).unwrap_or(0) as usize;
+            (16usize, off + 16, (off + big).min(end))
+        } else if size32 == 0 {
+            (8usize, off + 8, end)
+        } else {
+            (8usize, off + 8, (off + size32).min(end))
+        };
+        if body_start >= body_end {
+            break;
+        }
+        match ty {
+            b"moov" => {
+                let (d, _) = mp4_walk_boxes(b, body_start, body_end, depth + 1);
+                duration = duration.or(d);
+            }
+            b"trak" => {
+                let (_, dd) = mp4_walk_boxes(b, body_start, body_end, depth + 1);
+                if dims.is_none() {
+                    dims = dd;
+                }
+            }
+            b"mvhd" => {
+                let ver = *b.get(body_start).unwrap_or(&0);
+                let (ts, dur) = if ver == 1 {
+                    (be_u32(b, body_start + 20).unwrap_or(0), be_u64(b, body_start + 24).unwrap_or(0))
+                } else {
+                    (be_u32(b, body_start + 12).unwrap_or(0), be_u32(b, body_start + 16).unwrap_or(0) as u64)
+                };
+                if ts > 0 && duration.is_none() {
+                    duration = Some(dur as f64 / ts as f64);
+                }
+            }
+            b"tkhd" => {
+                // width/height 是 box 末尾 8 字节(16.16 定点)
+                let tail = match body_end.checked_sub(8) {
+                    Some(t) => t,
+                    None => break,
+                };
+                let w = be_u32(b, tail).unwrap_or(0) >> 16;
+                let h = be_u32(b, tail + 4).unwrap_or(0) >> 16;
+                if w > 0 && h > 0 && dims.is_none() {
+                    dims = Some((w, h));
+                }
+            }
+            _ => {}
+        }
+        off = body_end.max(off + header);
+    }
+    (duration, dims)
+}
+
+fn mp4_media_metadata(b: &[u8]) -> Option<MediaMeta> {
+    let (duration, dims) = mp4_walk_boxes(b, 0, b.len(), 0);
+    if duration.is_none() && dims.is_none() {
+        return None;
+    }
+    Some(MediaMeta {
+        duration_secs: duration.unwrap_or(0.0),
+        width: dims.map(|d| d.0).unwrap_or(0),
+        height: dims.map(|d| d.1).unwrap_or(0),
+        kind: "video/mp4",
+    })
+}
+
+/// WebM/MKV:EBML。找 Segment>Info(TimecodeScale+Duration float)与
+/// Segment>Tracks>TrackEntry(PixelWidth/PixelHeight)。
+fn ebml_read_vint(b: &[u8], off: usize) -> Option<(u64, usize)> {
+    let first = *b.get(off)?;
+    let len = first.leading_zeros() + 1;
+    if len > 8 || len == 0 {
+        return None;
+    }
+    let mut value = (first & (0xFF >> len)) as u64;
+    for i in 1..len as usize {
+        value = (value << 8) | (*b.get(off + i)? as u64);
+    }
+    Some((value, len as usize))
+}
+
+fn webm_walk(b: &[u8], start: usize, end: usize, depth: u32) -> (Option<f64>, Option<(u32, u32)>) {
+    let mut duration = None;
+    let mut dims = None;
+    let mut off = start;
+    while off + 2 <= end && depth < 6 {
+        let (id_len) = match ebml_read_vint(b, off) {
+            Some((_, l)) => l,
+            None => break,
+        };
+        let id = match b.get(off..off + id_len) {
+            Some(i) => i,
+            None => break,
+        };
+        let (size, size_len) = match ebml_read_vint(b, off + id_len) {
+            Some(v) => v,
+            None => break,
+        };
+        let body_start = off + id_len + size_len;
+        let body_end = (body_start + size as usize).min(end);
+        if body_start >= body_end {
+            break;
+        }
+        match id {
+            // Segment / Info / Tracks / TrackEntry:容器
+            [0x18, 0x53, 0x80, 0x67] | [0x15, 0x49, 0xA9, 0x66] | [0x16, 0x54, 0xAE, 0x6B] | [0xAE] => {
+                let (d, dd) = webm_walk(b, body_start, body_end, depth + 1);
+                duration = duration.or(d);
+                if dims.is_none() {
+                    dims = dd;
+                }
+            }
+            // TimecodeScale(0x2AD7B1,默认 1_000_000ns)
+            [0x2A, 0xD7, 0xB1] => {}
+            // Duration(0x4489,float)
+            [0x44, 0x89] => {
+                if size == 4 {
+                    let bits = be_u32(b, body_start).unwrap_or(0);
+                    let f = f32::from_bits(bits);
+                    if f.is_finite() && f > 0.0 {
+                        duration = Some(f as f64 / 1000.0);
+                    }
+                } else if size == 8 {
+                    let bits = be_u64(b, body_start).unwrap_or(0);
+                    let f = f64::from_bits(bits);
+                    if f.is_finite() && f > 0.0 {
+                        duration = Some(f / 1_000_000.0);
+                    }
+                }
+            }
+            // PixelWidth 0xB0 / PixelHeight 0xBA
+            [0xB0] => {
+                if size <= 4 {
+                    let mut val: u32 = 0;
+                    for i in 0..size as usize {
+                        val = (val << 8) | *b.get(body_start + i).unwrap_or(&0) as u32;
+                    }
+                    dims = Some((val, dims.map(|d| d.1).unwrap_or(0)));
+                }
+            }
+            [0xBA] => {
+                if size <= 4 {
+                    let mut val: u32 = 0;
+                    for i in 0..size as usize {
+                        val = (val << 8) | *b.get(body_start + i).unwrap_or(&0) as u32;
+                    }
+                    let (w, _) = dims.unwrap_or((0, 0));
+                    dims = Some((w, val));
+                }
+            }
+            _ => {}
+        }
+        off = body_end;
+    }
+    (duration, dims)
+}
+
+fn webm_media_metadata(b: &[u8]) -> Option<MediaMeta> {
+    // EBML 头 0x1A45DFA3
+    if b.len() < 4 || b[0] != 0x1A || b[1] != 0x45 || b[2] != 0xDF || b[3] != 0xA3 {
+        return None;
+    }
+    let (duration, dims) = webm_walk(b, 0, b.len(), 0);
+    if duration.is_none() && dims.is_none() {
+        return None;
+    }
+    Some(MediaMeta {
+        duration_secs: duration.unwrap_or(0.0),
+        width: dims.map(|d| d.0).unwrap_or(0),
+        height: dims.map(|d| d.1).unwrap_or(0),
+        kind: "video/webm",
+    })
+}
+
+/// AVI:RIFF....AVI LIST hdrl avih(dwMicroSecPerFrame@0, dwWidth@32, dwHeight@36)
+fn avi_media_metadata(b: &[u8]) -> Option<MediaMeta> {
+    if b.len() < 64 || &b[0..4] != b"RIFF" || &b[8..12] != b"AVI " {
+        return None;
+    }
+    // 简化:搜 "avih" 四字符
+    let pos = b.windows(4).position(|w| w == b"avih")?;
+    let us_per_frame = le_u32(b, pos + 4)? as f64 / 1_000_000.0;
+    let width = le_u32(b, pos + 4 + 32)?;
+    let height = le_u32(b, pos + 4 + 36)?;
+    // 总帧数:avih 后 dwTotalFrames(偏移 +16)
+    let total_frames = le_u32(b, pos + 4 + 16)? as f64;
+    let duration = if us_per_frame > 0.0 { total_frames * us_per_frame } else { 0.0 };
+    Some(MediaMeta {
+        duration_secs: duration,
+        width,
+        height,
+        kind: "video/x-msvideo",
+    })
+}
+
+/// MP3:MPEG 帧头(0xFFE)+ bitrates 表;有 Xing/Info 时用帧数,否则 CBR 估算。
+fn mp3_media_metadata(b: &[u8]) -> Option<MediaMeta> {
+    if b.len() < 4096 {
+        return None;
+    }
+    // 跳过 ID3v2
+    let mut off = 0usize;
+    if &b[0..3] == b"ID3" {
+        let size = ((b[6] as usize) << 21) | ((b[7] as usize) << 14) | ((b[8] as usize) << 7) | b[9] as usize;
+        off = 10 + size;
+    }
+    // 找帧头
+    let mut frame_off = None;
+    let mut i = off;
+    while i + 4 < b.len().min(off + 65536) {
+        if b[i] == 0xFF && (b[i + 1] & 0xE0) == 0xE0 {
+            frame_off = Some(i);
+            break;
+        }
+        i += 1;
+    }
+    let fo = frame_off?;
+    let ver = (b[fo + 1] >> 3) & 0x03; // 3=MPEG1, 2=MPEG2
+    let layer = (b[fo + 1] >> 1) & 0x03; // 1=Layer3
+    if layer != 1 {
+        return None;
+    }
+    let bitrate_idx = (b[fo + 2] >> 4) & 0x0F;
+    let sample_idx = (b[fo + 2] >> 2) & 0x03;
+    let bitrate_kbps: u32 = match (ver, bitrate_idx) {
+        (3, 1) => 32, (3, 2) => 40, (3, 3) => 48, (3, 4) => 56, (3, 5) => 64,
+        (3, 6) => 80, (3, 7) => 96, (3, 8) => 112, (3, 9) => 128, (3, 10) => 160,
+        (3, 11) => 192, (3, 12) => 224, (3, 13) => 256, (3, 14) => 320,
+        (2, 1) => 8, (2, 2) => 16, (2, 3) => 24, (2, 4) => 32, (2, 5) => 40,
+        (2, 6) => 48, (2, 7) => 56, (2, 8) => 64, (2, 9) => 80, (2, 10) => 96,
+        (2, 11) => 112, (2, 12) => 128, (2, 13) => 144, (2, 14) => 160,
+        _ => 0,
+    };
+    if bitrate_kbps == 0 {
+        return None;
+    }
+    // 文件大小(去 ID3)→ CBR 估时
+    let audio_bytes = b.len().saturating_sub(off) as f64;
+    let duration = audio_bytes * 8.0 / (bitrate_kbps as f64 * 1000.0);
+    let _ = sample_idx;
+    Some(MediaMeta {
+        duration_secs: duration,
+        width: 0,
+        height: 0,
+        kind: "audio/mpeg",
+    })
+}
+
+/// WAV:RIFF WAVE fmt chunk
+fn wav_media_metadata(b: &[u8]) -> Option<MediaMeta> {
+    if b.len() < 44 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
+        return None;
+    }
+    let pos = b.windows(4).position(|w| w == b"fmt ")?;
+    let sample_rate = le_u32(b, pos + 4 + 4)?;
+    let byte_rate = le_u32(b, pos + 4 + 8)?;
+    // data chunk
+    let dpos = b.windows(4).position(|w| w == b"data")?;
+    let data_len = le_u32(b, dpos + 4)? as f64;
+    let duration = if byte_rate > 0 { data_len / byte_rate as f64 } else { 0.0 };
+    let _ = sample_rate;
+    Some(MediaMeta {
+        duration_secs: duration,
+        width: 0,
+        height: 0,
+        kind: "audio/wav",
+    })
+}
+
+/// FLAC:STREAMINFO(samplerate 20bit + total_samples 36bit @offset 10..18)
+fn flac_media_metadata(b: &[u8]) -> Option<MediaMeta> {
+    if b.len() < 42 || &b[0..4] != b"fLaC" {
+        return None;
+    }
+    let sr = ((b[10] as u64) << 12) | ((b[11] as u64) << 4) | ((b[12] as u64) >> 4);
+    let total = (((b[13] as u64) & 0x0F) << 32) | ((b[14] as u64) << 24) | ((b[15] as u64) << 16) | ((b[16] as u64) << 8) | b[17] as u64;
+    let duration = if sr > 0 { total as f64 / sr as f64 } else { 0.0 };
+    Some(MediaMeta {
+        duration_secs: duration,
+        width: 0,
+        height: 0,
+        kind: "audio/flac",
+    })
+}
+
+fn probe_media_metadata(bytes: &[u8]) -> Option<MediaMeta> {
+    mp4_media_metadata(bytes)
+        .or_else(|| webm_media_metadata(bytes))
+        .or_else(|| avi_media_metadata(bytes))
+        .or_else(|| wav_media_metadata(bytes))
+        .or_else(|| flac_media_metadata(bytes))
+        .or_else(|| mp3_media_metadata(bytes))
+}
+
+/// 页面源:从 media 元素的 src/src 缓存读字节并返回容器元数据 JSON。
+/// 独立于 render feature(无图片解码依赖),bootstrap 用 typeof 探测。
+#[op2]
+#[string]
+fn op_media_metadata(state: &OpState, nid: u32) -> String {
+    let shared = state.borrow::<SharedState>().clone();
+    let gs = shared.borrow();
+    let node_id = NodeId::new(nid);
+    let dom = match gs.dom.as_ref() {
+        Some(d) => d,
+        None => return serde_json::json!({ "ok": false }).to_string(),
+    };
+    let (src, tag) = match dom.get_node(node_id) {
+        Some(node) => {
+            let is_media = node.as_element()
+                .map(|el| matches!(el.local.as_ref(), "video" | "audio" | "source"))
+                .unwrap_or(false);
+            if !is_media {
+                return serde_json::json!({ "ok": false }).to_string();
+            }
+            let src = node.get_attribute("src").unwrap_or_default().to_string();
+            let tag = node.as_element().map(|el| el.local.as_ref().to_string()).unwrap_or_default();
+            (src, tag)
+        }
+        None => return serde_json::json!({ "ok": false }).to_string(),
+    };
+    if src.is_empty() {
+        return serde_json::json!({ "ok": false }).to_string();
+    }
+    // HTTP(S) 资源:走共享 HTTP 客户端(阻塞调用线程;媒体容器头通常很小,
+    // mp4 的 moov 若在尾部会大 —— 上限 32MB)
+    let base = gs.url.clone();
+    let full = match url::Url::parse(&src) {
+        Ok(u) if u.scheme().starts_with("http") => u,
+        Ok(u) => match url::Url::parse(&base).ok().and_then(|b| b.join(u.as_str()).ok()) {
+            Some(j) => j,
+            None => return serde_json::json!({ "ok": false }).to_string(),
+        },
+        Err(_) => return serde_json::json!({ "ok": false }).to_string(),
+    };
+    let client = gs.http_client.clone();
+    drop(gs);
+    let bytes_result = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            rt.block_on(async move {
+                let client = client?;
+                let resp = client.fetch(&full).await.ok()?;
+                if !(200..300).contains(&resp.status) {
+                    return None;
+                }
+                if resp.body.len() > 32 * 1024 * 1024 {
+                    return None;
+                }
+                Some(resp.body)
+            })
+        })
+        .join()
+        .ok()?
+    });
+    let bytes = match bytes_result {
+        Some(b) => b,
+        None => return serde_json::json!({ "ok": false }).to_string(),
+    };
+    match probe_media_metadata(&bytes) {
+        Some(m) => serde_json::json!({
+            "ok": true,
+            "duration": m.duration_secs,
+            "videoWidth": m.width,
+            "videoHeight": m.height,
+            "kind": m.kind,
+        }).to_string(),
+        None => serde_json::json!({ "ok": false }).to_string(),
+    }
+}
+
+// ---- Image header probing (lightweight, zero-dependency) -------------------
+// 读出 PNG/JPEG/GIF/WebP/BMP/ICO 的内在尺寸,供 HTMLImageElement 的
+// naturalWidth/naturalHeight/complete 使用。不依赖 image crate(obscura-js
+// 不引 render 依赖);SVG 由 JS 侧解析宽高。
+
+fn png_size(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 24 || &b[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    // IHDR:width@16 height@20(大端)
+    let w = be_u32(b, 16)?;
+    let h = be_u32(b, 20)?;
+    Some((w, h))
+}
+
+fn gif_size(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 10 || (&b[0..3] != b"GIF") {
+        return None;
+    }
+    // LE u16 width@6 height@8
+    let w = u16::from_le_bytes([b[6], b[7]]) as u32;
+    let h = u16::from_le_bytes([b[8], b[9]]) as u32;
+    Some((w, h))
+}
+
+fn bmp_size(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 26 || b[0] != b'B' || b[1] != b'M' {
+        return None;
+    }
+    let w = le_u32(b, 18)?;
+    let h = le_u32(b, 22)?; // 有符号 top-down 标志在高位;取绝对值
+    let h = (h as i32).unsigned_abs();
+    Some((w, h))
+}
+
+fn jpeg_size(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 4 || b[0] != 0xFF || b[1] != 0xD8 {
+        return None;
+    }
+    let mut off = 2usize;
+    while off + 9 <= b.len() {
+        if b[off] != 0xFF {
+            off += 1;
+            continue;
+        }
+        let marker = b[off + 1];
+        // SOF0..SOF15(除 DHT C4 / DAC CC / JPG C8 / DNL C9)
+        let is_sof = (0xC0..=0xCF).contains(&marker) && ![0xC4, 0xC8, 0xCC].contains(&marker);
+        if is_sof {
+            let h = u16::from_be_bytes([*b.get(off + 5)?, *b.get(off + 6)?]) as u32;
+            let w = u16::from_be_bytes([*b.get(off + 7)?, *b.get(off + 8)?]) as u32;
+            return Some((w, h));
+        }
+        let len = u16::from_be_bytes([*b.get(off + 2)?, *b.get(off + 3)?]) as usize;
+        if len < 2 {
+            return None;
+        }
+        off += 2 + len;
+    }
+    None
+}
+
+fn webp_size(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 30 || &b[0..4] != b"RIFF" || &b[8..12] != b"WEBP" {
+        return None;
+    }
+    match &b[12..16] {
+        b"VP8 " => {
+            // 关键帧:frame tag 3 字节(跳过);width@26 height@28(14bit)
+            let w = (u16::from_le_bytes([b[26], b[27]]) & 0x3FFF) as u32;
+            let h = (u16::from_le_bytes([b[28], b[29]]) & 0x3FFF) as u32;
+            Some((w, h))
+        }
+        b"VP8L" => {
+            // bits@21:14bit width-1, 14bit height-1
+            let bits = u32::from_le_bytes([b[21], b[22], b[23], b[24]]);
+            let w = (bits & 0x3FFF) + 1;
+            let h = ((bits >> 14) & 0x3FFF) + 1;
+            Some((w, h))
+        }
+        b"VP8X" => {
+            // canvas size 24bit LE -1:w@24 h@27
+            let w = (b[24] as u32) | ((b[25] as u32) << 8) | ((b[26] as u32) << 16);
+            let h = (b[27] as u32) | ((b[28] as u32) << 8) | ((b[29] as u32) << 16);
+            Some((w + 1, h + 1))
+        }
+        _ => None,
+    }
+}
+
+fn ico_size(b: &[u8]) -> Option<(u32, u32)> {
+    if b.len() < 8 || b[0] != 0x00 || b[1] != 0x00 || b[2] != 0x01 || b[3] != 0x00 {
+        return None;
+    }
+    // ICONDIRENTRY[0]:w@6 h@7(0 = 256)
+    let w = if b[6] == 0 { 256 } else { b[6] as u32 };
+    let h = if b[7] == 0 { 256 } else { b[7] as u32 };
+    Some((w, h))
+}
+
+/// 元素驱动:按 img 的 currentSrc 取缓存字节并探测尺寸。
+#[op2]
+#[string]
+fn op_image_size_for_element(state: &OpState, nid: u32) -> String {
+    let shared = state.borrow::<SharedState>().clone();
+    let gs = shared.borrow();
+    let node_id = NodeId::new(nid);
+    let dom = match gs.dom.as_ref() {
+        Some(d) => d,
+        None => return serde_json::json!({ "ok": false, "error": "no-dom" }).to_string(),
+    };
+    let node = match dom.get_node(node_id) {
+        Some(n) => n,
+        None => return serde_json::json!({ "ok": false, "error": "no-node" }).to_string(),
+    };
+    let is_img = node.as_element().map(|e| e.local.as_ref() == "img").unwrap_or(false);
+    if !is_img {
+        return serde_json::json!({ "ok": false, "error": "not-img" }).to_string();
+    }
+    let src = node.get_attribute("src").unwrap_or_default().to_string();
+    if src.is_empty() {
+        return serde_json::json!({ "ok": false, "error": "no-src" }).to_string();
+    }
+    let base = gs.url.clone();
+    let full = match url::Url::parse(&src) {
+        Ok(u) if u.scheme().starts_with("data") || u.scheme().starts_with("http") => u,
+        Ok(u) => match url::Url::parse(&base).ok().and_then(|b| b.join(u.as_str()).ok()) {
+            Some(j) => j,
+            None => return serde_json::json!({ "ok": false, "error": "join" }).to_string(),
+        },
+        Err(_) => return serde_json::json!({ "ok": false, "error": "parse" }).to_string(),
+    };
+    let client = gs.http_client.clone();
+    drop(gs);
+    let bytes_result: Result<Vec<u8>, String> = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(r) => r,
+                Err(e) => return Err(format!("rt:{}", e)),
+            };
+            rt.block_on(async move {
+                if full.scheme() == "data" {
+                    let s = full.as_str();
+                    let comma = match s.find(',') {
+                        Some(c) => c,
+                        None => return Err("data:no-comma".into()),
+                    };
+                    let meta = &s[..comma];
+                    let payload = &s[comma + 1..];
+                    if meta.contains("base64") {
+                        use base64::Engine as _;
+                        match base64::engine::general_purpose::STANDARD.decode(payload) {
+                            Ok(v) => Ok(v),
+                            Err(e) => Err(format!("b64:{}", e)),
+                        }
+                    } else {
+                        Ok(payload.as_bytes().to_vec())
+                    }
+                } else {
+                    let client = match client {
+                        Some(c) => c,
+                        None => return Err("no-client".to_string()),
+                    };
+                    match client.fetch(&full).await {
+                        Ok(resp) => {
+                            if !(200..300).contains(&resp.status) {
+                                return Err(format!("http:{}", resp.status));
+                            }
+                            Ok(resp.body)
+                        }
+                        Err(e) => Err(format!("fetch:{}", e)),
+                    }
+                }
+            })
+        })
+        .join()
+        .unwrap_or_else(|_| Err("join".into()))
+    });
+    let bytes = match bytes_result {
+        Ok(b) => b,
+        Err(e) => return serde_json::json!({ "ok": false, "error": e }).to_string(),
+    };
+    let dims = png_size(&bytes)
+        .or_else(|| jpeg_size(&bytes))
+        .or_else(|| gif_size(&bytes))
+        .or_else(|| webp_size(&bytes))
+        .or_else(|| bmp_size(&bytes))
+        .or_else(|| ico_size(&bytes));
+    match dims {
+        Some((w, h)) => serde_json::json!({ "ok": true, "width": w, "height": h }).to_string(),
+        None => serde_json::json!({ "ok": false, "error": "undecoded", "bytes": bytes.len() }).to_string(),
+    }
 }

@@ -11,9 +11,11 @@ stealth = ["obscura-net/stealth", "obscura-js/stealth"]
 render = ["obscura-js/render", "dep:image"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 obscura-dom = { workspace = true }
 obscura-net = { workspace = true }
 obscura-js = { workspace = true }
+obscura-webgl = { workspace = true }
 tokio = { workspace = true }
 futures = "0.3"
 url = { workspace = true }

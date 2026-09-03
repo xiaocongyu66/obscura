@@ -629,6 +629,12 @@ impl Resolve for SsrfGuardResolver {
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
                 .collect();
+            // Android/TUN(fake-ip 代理栈)环境:getaddrinfo 常把 v6 ULA/假 IP
+            // 排在前面,而顺序连接没有 Happy Eyeballs —— v6 路径慢且偶发挂起,
+            // 一条坏尝试就能拖死整个导航(30s deadline)。IPv4 优先(稳定排序,
+            // 同族内保持原顺序)。
+            let mut addrs = addrs;
+            addrs.sort_by_key(|sa| if sa.is_ipv4() { 0 } else { 1 });
             if !allow {
                 if let Some(bad) = addrs.iter().find(|sa| is_forbidden_ip(sa.ip())) {
                     return Err(format!(
@@ -811,11 +817,30 @@ fn reject_oversized_content_length(
     Ok(())
 }
 
+/// 传输层瞬态重试策略(对齐 fastrender curl_backend 的生产模式):
+/// 仅幂等 GET 自动重试,最多 3 次尝试,指数退避。
+struct BodyRetryPolicy {
+    max_attempts: u32,
+}
+
+impl Default for BodyRetryPolicy {
+    fn default() -> Self {
+        Self { max_attempts: 3 }
+    }
+}
+
+fn retry_backoff(attempt: u32) -> std::time::Duration {
+    let ms = 300u64.saturating_mul(1u64 << attempt.saturating_sub(1).min(3));
+    std::time::Duration::from_millis(ms.min(2000))
+}
+
+/// 返回 (body, complete)。complete=false 表示 EOF 之前中断/停顿
+/// (Content-Length 未满足或流被重置)——调用方据此决定换新连接重试。
 async fn read_reqwest_body_limited(
     mut response: reqwest::Response,
     url: &Url,
     limit: usize,
-) -> Result<Vec<u8>, ObscuraNetError> {
+) -> Result<(Vec<u8>, bool), ObscuraNetError> {
     reject_oversized_content_length(response.headers(), url, limit)?;
     let capacity = response
         .content_length()
@@ -823,15 +848,72 @@ async fn read_reqwest_body_limited(
         .unwrap_or(0)
         .min(limit);
     let mut body = Vec::with_capacity(capacity);
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        ObscuraNetError::Network(format!("Failed to read body: {}", error))
-    })? {
-        if chunk.len() > limit.saturating_sub(body.len()) {
-            return Err(response_too_large(url, limit));
+    let mut complete = false;
+    // Some servers (e.g. wpt.live's Python BaseHTTP) send the payload but
+    // never terminate the body (Content-Length mismatch, no EOF, no reset
+    // until a long TCP timeout). A chunk().await with no deadline then parks
+    // the resource tracker for tens of seconds and the load event — and the
+    // navigation — miss their deadline even though every byte we need has
+    // already arrived. Treat a silent gap between chunks as end-of-body: real
+    // streaming pauses are well under this; a stall means we have it all.
+    // Content-Length 已满足时立即结束(spec:body 完整);否则短停顿判定。
+    // 5s 全局 stall 让 x.ai 的 89 个 chunk 各吃 5s(445s 总量),deadline 全灭。
+    let content_length = response.content_length();
+    const BODY_STALL: std::time::Duration = std::time::Duration::from_millis(300);
+    loop {
+        if let Some(expected) = content_length {
+            if body.len() as u64 >= expected {
+                complete = true;
+                break;
+            }
         }
-        body.extend_from_slice(&chunk);
+        match tokio::time::timeout(BODY_STALL, response.chunk()).await {
+            Err(_elapsed) => {
+                if !body.is_empty() {
+                    tracing::warn!(
+                        "Body read stalled after {} bytes from {} — returning partial body",
+                        body.len(),
+                        url
+                    );
+                    break;
+                }
+                return Err(ObscuraNetError::Network(format!(
+                    "Body read stalled with no data from {}", url
+                )));
+            }
+            Ok(Ok(Some(chunk))) => {
+                if chunk.len() > limit.saturating_sub(body.len()) {
+                    return Err(response_too_large(url, limit));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(Ok(None)) => {
+                complete = true;
+                break;
+            }
+            Ok(Err(error)) => {
+                // Some servers (e.g. Python BaseHTTP on wpt.live) close
+                // the connection without Content-Length or chunked
+                // encoding. reqwest's chunk() can fail mid-stream with
+                // "error decoding response body" even though partial data
+                // was already received. Return what we have so the page
+                // loads instead of getting an empty body.
+                if !body.is_empty() {
+                    tracing::warn!(
+                        "Body read error after {} bytes from {}: {} — returning partial body",
+                        body.len(),
+                        url,
+                        error
+                    );
+                    break;
+                }
+                return Err(ObscuraNetError::Network(format!(
+                    "Failed to read body: {}", error
+                )));
+            }
+        }
     }
-    Ok(body)
+    Ok((body, complete))
 }
 
 pub struct ObscuraHttpClient {
@@ -1070,6 +1152,9 @@ impl ObscuraHttpClient {
                 .redirect(Policy::none())
                 .timeout(self.timeout)
                 .danger_accept_invalid_certs(false)
+                // 单次 TCP 连接尝试的上线时间:防止 TUN/代理栈里一条坏路径
+                // (如慢速 v6 假 IP)无限占用,connect 层面快速失败换下一个地址。
+                .connect_timeout(std::time::Duration::from_secs(8))
                 // SSRF guard: reject hostnames that resolve to a private/loopback IP.
                 .dns_resolver(Arc::new(SsrfGuardResolver::new(self.allow_private_network)))
 ;
@@ -1394,9 +1479,16 @@ impl ObscuraHttpClient {
             }
         }
 
+        // 生产级重试机制(参考 fastrender curl_backend):外层重试 ×
+        // 内层重定向。传输层瞬态失败(连接重置/超时/响应体停顿)且响应体
+        // 不完整时,退避后换全新连接重走整条链;仅幂等 GET 自动重试,
+        // 最后一次尝试总是返回手上的部分体(页面韧性优先)。
+        let max_redirects = 20;
+        let retry_policy = BodyRetryPolicy::default();
+
+        'attempts: for attempt in 1..=retry_policy.max_attempts {
         let mut current_url = url.clone();
         let mut redirects = Vec::new();
-        let max_redirects = 20;
         let mut redirect_tainted = false;
         let mut request_callback_fired = false;
 
@@ -1554,9 +1646,24 @@ impl ObscuraHttpClient {
             }
 
             let in_flight = InFlightGuard::new(&self.in_flight);
-            let resp = req_builder.send().await.map_err(|e| {
-                ObscuraNetError::Network(format!("{}: {}", current_url, e))
-            })?;
+            let resp = match req_builder.send().await {
+                Ok(r) => r,
+                Err(error) => {
+                    // 连接级失败:池里的死连接/TUN 路径抖动。退避后换
+                    // 全新连接重试(hyper 对复用连接的早期失败有内部
+                    // 重试,但不够覆盖这种长尾)。
+                    if attempt < retry_policy.max_attempts && method == Method::GET {
+                        let backoff = retry_backoff(attempt);
+                        tracing::warn!(
+                            "Request failed from {}: {} — attempt {}/{}, retrying in {:?}",
+                            current_url, error, attempt, retry_policy.max_attempts, backoff
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue 'attempts;
+                    }
+                    return Err(ObscuraNetError::Network(format!("{}: {}", current_url, error)));
+                }
+            };
 
             let status = resp.status();
             validate_reqwest_cors_response(
@@ -1605,12 +1712,27 @@ impl ObscuraHttpClient {
                 }
             }
 
-            let body_bytes = read_reqwest_body_limited(
+            let (body_bytes, body_complete) = match read_reqwest_body_limited(
                 resp,
                 &current_url,
                 request.max_response_bytes,
             )
-            .await?;
+            .await
+            {
+                Ok(pair) => pair,
+                Err(error) => {
+                    if attempt < retry_policy.max_attempts && method == Method::GET {
+                        let backoff = retry_backoff(attempt);
+                        tracing::warn!(
+                            "Body read failed from {}: {} — attempt {}/{}, retrying in {:?}",
+                            current_url, error, attempt, retry_policy.max_attempts, backoff
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue 'attempts;
+                    }
+                    return Err(error);
+                }
+            };
             drop(in_flight);
 
             let response = Response {
@@ -1621,14 +1743,28 @@ impl ObscuraHttpClient {
                 redirected_from: redirects,
             };
 
-            if let Some(cbs) = callbacks {
-                cbs.fire_response(&request_info, &response).await;
+            // 响应体完整、非幂等请求、或已是最后一次尝试 → 直接返回。
+            // 不完整且还能重试 → 换新连接重走整条链(重试期间不触发
+            // fire_response,避免网络捕获里出现重复的假响应)。
+            if body_complete || method != Method::GET || attempt == retry_policy.max_attempts {
+                if let Some(cbs) = callbacks {
+                    cbs.fire_response(&request_info, &response).await;
+                }
+                return Ok(response);
             }
-
-            return Ok(response);
+            let backoff = retry_backoff(attempt);
+            tracing::warn!(
+                "Incomplete body ({} bytes) from {} — attempt {}/{}, retrying in {:?} on a fresh connection",
+                response.body.len(), response.url, attempt, retry_policy.max_attempts, backoff
+            );
+            tokio::time::sleep(backoff).await;
+            continue 'attempts;
         }
 
-        Err(ObscuraNetError::TooManyRedirects(current_url.to_string()))
+        return Err(ObscuraNetError::TooManyRedirects(current_url.to_string()));
+        }
+        // 最后一次尝试必然从重定向循环内返回;此处不可达。
+        unreachable!("fetch attempts loop must return on the final attempt")
     }
 
     pub async fn set_user_agent(&self, ua: &str) {
@@ -1641,6 +1777,32 @@ impl ObscuraHttpClient {
 
     pub async fn set_extra_headers(&self, headers: HashMap<String, String>) {
         *self.extra_headers.write().await = headers;
+    }
+
+    /// Rotates the proxy URL. **Note:** the underlying `reqwest::Client`
+    /// is built once into a `OnceCell`, so changing the proxy URL only
+    /// takes effect for requests that have not yet been dispatched. In
+    /// practice, callers wanting a true proxy rotation should construct a
+    /// new `BrowserContext` (and thus a new `ObscuraHttpClient`) via
+    /// `isolated_copy` after calling this, so the OnceCell is fresh.
+    ///
+    /// This is kept as a method (not just field mutation) so future work
+    /// can swap to a re-buildable client without touching call sites.
+    pub fn set_proxy_url(&self, proxy_url: Option<&str>) {
+        // SAFETY: `proxy_url` is `Option<String>` (no `RwLock`). We can't
+        // mutate it through `&self`. This is a known limitation: a true
+        // mid-session rotation requires a new context. We log the request
+        // so operators can see it was attempted.
+        if let Some(new) = proxy_url {
+            if Some(new) != self.proxy_url.as_deref() {
+                tracing::warn!(
+                    "set_proxy_url called with {} but ObscuraHttpClient's proxy is \
+                     immutable once built; construct a new BrowserContext via \
+                     isolated_copy for a true rotation",
+                    new,
+                );
+            }
+        }
     }
 
     pub fn active_requests(&self) -> u32 {

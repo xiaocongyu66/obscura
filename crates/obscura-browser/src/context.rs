@@ -193,6 +193,28 @@ impl BrowserContext {
         }
     }
 
+    /// Rotates the proxy URL on this context. **Important:** the underlying
+    /// `ObscuraHttpClient` builds its `reqwest::Client` once into a
+    /// `OnceCell`, so a mid-session proxy swap on the same client does
+    /// NOT take effect for in-flight requests — you need a fresh context
+    /// via `isolated_copy` for a true rotation. This method exists so
+    /// callers can drive rotation from a `ProxyPool` and immediately
+    /// build a new isolated context with the new proxy.
+    ///
+    /// Use `proxy_url()` to read the current value (useful when logging
+    /// the rotation).
+    pub fn set_proxy(&self, proxy_url: Option<String>) {
+        self.http_client.set_proxy_url(proxy_url.as_deref());
+    }
+
+    /// Returns the proxy URL this context was built with. This is the
+    /// value passed at construction; it does NOT reflect a mid-session
+    /// rotation (because the http_client's proxy is immutable once the
+    /// client is built).
+    pub fn proxy_url(&self) -> Option<&str> {
+        self.proxy_url.as_deref()
+    }
+
     /// Persist cookies to disk if storage_dir is configured.
     /// Called during graceful shutdown.
     pub fn save_cookies(&self) {

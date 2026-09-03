@@ -101,6 +101,13 @@ enum Command {
         /// that flood the console with per-page script warnings (issue #264).
         #[arg(long)]
         quiet: bool,
+
+        /// Use the JS stub WebGL backend instead of the Rust (PortableGL)
+        /// software renderer. The JS stub is faster and sufficient for
+        /// fingerprinting probes but doesn't do real rendering. By default
+        /// the Rust backend is enabled (real GLSL compile + CPU rendering).
+        #[arg(long)]
+        no_webgl_rust: bool,
     },
 
     Fetch {
@@ -185,6 +192,11 @@ enum Command {
     Mcp {
         #[arg(long)]
         http: bool,
+
+        /// Run the MCP server over WebSocket (each connection = isolated
+        /// session with its own fingerprint, cookie jar, and proxy).
+        #[arg(long)]
+        ws: bool,
 
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
@@ -368,7 +380,16 @@ async fn main() -> anyhow::Result<()> {
             allow_file_access,
             storage_dir,
             quiet: _,
+            no_webgl_rust,
         }) => {
+            // Rust WebGL backend is enabled by default. --no-webgl-rust
+            // switches to the JS stub (faster, no real rendering).
+            obscura_js::set_webgl_rust_backend(!no_webgl_rust);
+            if !no_webgl_rust {
+                tracing::info!("WebGL backend: Rust (PortableGL software renderer)");
+            } else {
+                tracing::info!("WebGL backend: JS stub (--no-webgl-rust)");
+            }
             // Fall back to OBSCURA_PROXY so a proxy can be supplied without
             // putting credentials on the command line. The multi-worker load
             // balancer passes the proxy to each worker this way (issue #366).
@@ -509,13 +530,16 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Mcp {
             http,
+            ws,
             host,
             port,
             proxy,
             user_agent,
         }) => {
             let mcp_proxy = merge_proxy(global_proxy.clone(), proxy);
-            if http {
+            if ws {
+                obscura_mcp::ws::run(host, port, mcp_proxy, user_agent, stealth).await?;
+            } else if http {
                 obscura_mcp::http::run(host, port, mcp_proxy, user_agent, stealth).await?;
             } else {
                 obscura_mcp::run(mcp_proxy, user_agent, stealth).await?;

@@ -84,20 +84,17 @@ globalThis.onerror = function(msg, src, line, col, error) {
   globalThis.__obscura_errors.push({msg: String(msg), src: String(src||""), line, error: String(error||"")});
 };
 globalThis.__windowListeners = {};
-globalThis.addEventListener = function(type, fn) {
-  if (!globalThis.__windowListeners[type]) globalThis.__windowListeners[type] = [];
-  globalThis.__windowListeners[type].push(fn);
+// window 的 listener 与 Node/Element 共享一张表(spec:EventTarget 统一;
+// 事件 path 根部的 window capture/bubble listener 必须参与分发)。
+globalThis.addEventListener = function(type, fn, opts) {
+  _eventTargetAdd(globalThis, type, fn, opts);
 };
-globalThis.removeEventListener = function(type, fn) {
-  if (globalThis.__windowListeners[type]) {
-    globalThis.__windowListeners[type] = globalThis.__windowListeners[type].filter(h => h !== fn);
-  }
+globalThis.removeEventListener = function(type, fn, opts) {
+  _eventTargetRemove(globalThis, type, fn, opts);
 };
 globalThis.dispatchEvent = function(event) {
   if (!event) return true;
-  const handlers = globalThis.__windowListeners[event.type] || [];
-  for (const h of handlers) { try { h.call(globalThis, event); } catch(e) { console.error(e); } }
-  return !event.defaultPrevented;
+  return _eventTargetDispatch(globalThis, event);
 };
 
 let _domMutationEpoch = 0;
@@ -365,10 +362,10 @@ async function __runDynScriptTask(task) {
         // parser script happened to trigger the microtask checkpoint.
         await new Promise(resolve => {
           const execute = () => {
-            globalThis.__currentScriptNid = task.nid;
+            _pushCurrentScript(task.nid);
             try { (0, eval)(body); }
             catch(e) { console.error('Dynamic script error (' + task.url + '):', e.message); }
-            finally { globalThis.__currentScriptNid = task.prevNid || 0; }
+            finally { _popCurrentScript(task.prevNid, task.prevSync); }
             resolve();
           };
           if (_scheduleAfter(0, execute) === undefined) execute();
@@ -702,6 +699,32 @@ const _eventRegistry = globalThis._eventRegistry;
 const _formValues = globalThis._formValues;
 const _formChecked = globalThis._formChecked;
 const _domParse = (cmd, a1, a2) => { try { return JSON.parse(_dom(cmd, a1, a2)); } catch { return null; } };
+// querySelector 解析错误标记(op 层):浏览器语义 = 抛 DOMException SyntaxError。
+// 放在 _domParse 之后:它们引用 IIFE 作用域的 _dom,放文件外层会 ReferenceError
+// 并炸掉整个 bootstrap(此前 0/0 事故的根因)。
+const _qsCheck = (raw) => {
+  if (typeof raw === 'string' && raw.indexOf('!SYNTAX_ERR:') === 0) {
+    // 用 globalThis.DOMException(跨 realm 共享后的构造器):WPT 三参
+    // assert_throws_dom 用 (doc.defaultView||self).DOMException 做
+    // instanceof 检查,IIFE 闭包里的本地类在 frame realm 下必败。
+    throw new globalThis.DOMException(raw.slice(12), "SyntaxError");
+  }
+  return raw;
+};
+const _qsCheckSelector = (q) => {
+  // CSS 规范:空选择器是 SyntaxError(WPT 断言依赖)
+  if (String(q).trim() === "") {
+    throw new globalThis.DOMException("'" + q + "' is not a valid selector.", "SyntaxError");
+  }
+  return q;
+};
+const _qsScopedAll = (nid, q) => {
+  const raw = _dom("query_selector_all_scoped", nid, q);
+  _qsCheck(raw);
+  try { return JSON.parse(raw) || []; } catch (e) { return []; }
+};
+const _qsSingleScoped = (nid, q) => +_qsCheck(_dom("query_selector_scoped", nid, q));
+
 
 // HTML "ASCII whitespace": U+0009 TAB, U+000A LF, U+000C FF, U+000D CR, U+0020 SPACE.
 // Class token splitting (classList, getElementsByClassName) uses exactly this set.
@@ -718,12 +741,14 @@ function _splitAsciiWhitespace(s) {
 function _getElementsByClassName(root, classNames) {
   const tokens = _splitAsciiWhitespace(classNames);
   if (tokens.length === 0) return HTMLCollection._from([]);
-  // Fast path: a single CSS-identifier token goes straight to the native
-  // selector engine (the common case). Only multi-token sets or exotic class
-  // names (NBSP, leading digits, etc.) fall back to the O(n) JS scan below.
-  if (tokens.length === 1 && /^[A-Za-z_-][\w-]*$/.test(tokens[0])) {
-    return HTMLCollection._from(root.querySelectorAll("." + tokens[0]));
+  // CSS 标识符 token 直接拼 class 选择器走 live 集合(DOM/className 变更即时反映,
+  // WPT getElementsByClassName 的 live 断言依赖这一点)。
+  // 生僻 class 名(NBSP、前导数字等)保留 O(n) 扫描快照。
+  let simple = true;
+  for (let t = 0; t < tokens.length; t++) {
+    if (!/^[A-Za-z_-][\w-]*$/.test(tokens[t])) { simple = false; break; }
   }
+  if (simple) return _makeLiveSelectorCollection(root, "." + tokens.join("."));
   const all = root.querySelectorAll("*");
   const matched = [];
   for (let i = 0; i < all.length; i++) {
@@ -1773,6 +1798,7 @@ function __prepareInsertedScript(script) {
   const code = src ? "" : script.textContent;
   if (!src && !code) return;
   const prevNid = globalThis.__currentScriptNid;
+  const prevSync = globalThis.__currentScriptSync;
   if (src) {
     let baseHref;
     try {
@@ -1798,6 +1824,7 @@ function __prepareInsertedScript(script) {
       isModule,
       nid: script._nid,
       prevNid,
+      prevSync,
       pageOrigin,
       dispatchEvent: (ev) => { try { script.dispatchEvent(ev); } catch(e) {} },
     };
@@ -1836,6 +1863,7 @@ function __prepareInsertedScript(script) {
       isModule: true,
       nid: script._nid,
       prevNid,
+      prevSync,
       pageOrigin: "",
       dispatchEvent: (ev) => { try { script.dispatchEvent(ev); } catch(e) {} },
       delaysLoad: globalThis.document?.readyState !== 'complete',
@@ -1844,10 +1872,10 @@ function __prepareInsertedScript(script) {
     __dynScriptQueue.push(task);
     __processDynScriptQueue();
   } else {
-    globalThis.__currentScriptNid = script._nid;
+    _pushCurrentScript(script._nid);
     try { (0, eval)(code); }
     catch(e) { console.error('Dynamic inline script error:', e.message); }
-    finally { globalThis.__currentScriptNid = prevNid || 0; }
+    finally { _popCurrentScript(prevNid, prevSync); }
   }
 }
 
@@ -1917,7 +1945,24 @@ class Node {
   constructor(nid) { this._nid = nid; }
   get nodeType() { return +_dom("node_type", this._nid); }
   get nodeName() { return _domParse("node_name", this._nid) || ""; }
-  get ownerDocument() { return globalThis.document; }
+  get ownerDocument() {
+    // DOM 规范:返回最近的 document 祖先;document 自身返回 null。
+    // 游离节点用创建它的 document 标记(_ownerDocument,由各 creator 打点)。
+    // 之前写死返回 globalThis.document,frame 文档/合成文档下
+    // `s.ownerDocument === doc` 的同一性断言全部失败。
+    if (this.nodeType === 9) return null;
+    if (this.isConnected) {
+      let n = this;
+      for (;;) {
+        const p = n.parentNode;
+        if (!p) break;
+        if (p.nodeType === 9) return p;
+        n = p;
+      }
+    }
+    if (this._ownerDocument) return this._ownerDocument;
+    return globalThis.document || null;
+  }
   // https://dom.spec.whatwg.org/#dom-node-baseuri
   get baseURI() {
     try {
@@ -1952,8 +1997,11 @@ class Node {
     // Real MutationObserver fires childList for the children swap.
     // Without this React 18+ hydration mismatch detection and many polling
     // libs (intersection-driven lazy load, content sync) silently stall.
-    if (globalThis.__mutationObservers?.length) {
-      globalThis.__notifyMutation('childList', this._nid, added, oldChildren);
+    // 无子且不添加(空节点上设 "")→ 无变化,不产生 record(WPT)。
+    if (globalThis.__mutationObservers?.length && (oldChildren.length || added.length)) {
+      const _mPrev = this.firstChild ? this.firstChild.previousSibling : null;
+      globalThis.__notifyMutation('childList', this._nid, added, oldChildren, null, null,
+        _mPrev ? _mPrev._nid : null, null);
     }
   }
   get nodeValue() {
@@ -1969,16 +2017,21 @@ class Node {
     if (this._shadowParent) return this._shadowParent;
     if (this._treeDetachedExact) return null;
     if (this._treeParentEpoch === _treeMutationEpoch) return this._treeParent;
-    const parent = _wrap(+_dom("parent_node", this._nid));
+    const pnid = +_dom("parent_node", this._nid);
+    // DOM spec:document 的 parentNode 为 null;documentElement 的 parentNode
+    // 是**全局 document 单例**(身份相等,事件路径/比较依赖 ===)。
+    let parent;
+    if (pnid === 0) {
+      parent = this.nodeType === 9 ? null : globalThis.document || null;
+    } else {
+      parent = _wrap(pnid);
+    }
     this._treeParent = parent;
     this._treeParentEpoch = _treeMutationEpoch;
     return parent;
   }
   get parentElement() { const p = this.parentNode; return p && p.nodeType === 1 ? p : null; }
-  get childNodes() {
-    const ids = _domParse("child_nodes", this._nid) || [];
-    return _nodeList(ids.map(_wrap).filter(Boolean));
-  }
+  get childNodes() { return _liveNodeList(this); }
   get firstChild() { return _wrap(+_dom("first_child", this._nid)); }
   get lastChild() { return _wrap(+_dom("last_child", this._nid)); }
   get nextSibling() {
@@ -1998,14 +2051,56 @@ class Node {
     return _wrap(+_dom("prev_sibling", this._nid));
   }
   appendChild(c) {
-    if (!c) return c;
+    if (!c || c._nid === undefined || c._nid === null) {
+      throw new TypeError("Failed to execute 'appendChild' on 'Node': parameter 1 is not of type 'Node'.");
+    }
+    _validateParentForInsertion(this);
     if (c instanceof DocumentFragment) {
+      // spec:fragment 插入=子节点一次性转移,**单条** childList record
+      // (addedNodes=全部子,锚点=原 lastChild)。
       const children = Array.from(c.childNodes);
-      for (const child of children) this.appendChild(child);
+      if (!children.length) return c;
+      const prev = this.lastChild;
+      const added = [];
+      globalThis.__moSuppressTarget = 'all';
+      try {
+        for (const child of children) { this.appendChild(child); added.push(child._nid); }
+      } finally { globalThis.__moSuppressTarget = null; }
+      if (globalThis.__mutationObservers?.length && added.length) {
+        globalThis.__notifyMutation('childList', this._nid, added, [], null, null,
+          prev ? prev._nid : null, null);
+        // fragment 自身视角:子全部移走 → 单条合并 removed(WPT n44)
+        if (children.length) {
+          globalThis.__notifyMutation('childList', c._nid, [],
+            children.map(function(n) { return n._nid; }));
+        }
+      }
       return c;
     }
+    const _isMove = c.parentNode === this;
+    const _mvPrev = _isMove ? c.previousSibling : null;
+    const _mvNext = _isMove ? c.nextSibling : null;
+    if (_isMove) globalThis.__moSuppressTarget = this._nid;
     if (c._shadowParent) c._shadowParent.removeChild(c);
-    else if (c.parentNode) _detachStyleSheetsInSubtree(c);
+    else if (c.parentNode) {
+      // 跨父移动:旧 parent 收到独立的 removed record(WPT
+      // ParentNode-replaceChildren "move nodes in the right order" 断言
+      // 旧 observer 在新 observer 之前收到各一条 removed)。
+      const _oldParent = c.parentNode;
+      const _op = c.previousSibling, _on = c.nextSibling;
+      _detachStyleSheetsInSubtree(c);
+      // 同父移动的 removed 由 move 分支统一发(避免 3 条);c 自身是
+      // fragment(子从它身上拆走)时逐条跳过 —— 它的合并 record 在 fragment
+      // 分支单独发(WPT n44 期望 1 条)。其余跨父移动正常逐条(WPT
+      // replaceChildren 的旧 parent 每节点一条)。
+      if (!_isMove && _oldParent !== c && globalThis.__mutationObservers?.length) {
+        // 旧 parent 的 removed 独立于 target gate(replaceChildren 只抑制
+        // 目标 parent 的 record;Servo Step 25 逐节点)。
+        globalThis.__notifyMutation('childList', _oldParent._nid, [], [c._nid], null, null,
+          _op ? _op._nid : null, _on ? _on._nid : null);
+      }
+    }
+    _validateNodeContent(this, c, null);
     const parentConnected = this.isConnected;
     const inserted = _dom("append_child", this._nid, c._nid) === "true";
     if (!inserted) {
@@ -2017,7 +2112,22 @@ class Node {
     _seedUnchangedConnection(this, parentConnected);
     _seedInsertedTreeState(c, this, parentConnected);
     _registerWindowNamedTree(c);
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [c._nid], []);
+    if (globalThis.__mutationObservers?.length) {
+      if (_isMove) {
+        // 同父移动:spec 产生两条 —— 先 removed(旧位置邻居)再 added
+        globalThis.__moSuppressTarget = null;
+        globalThis.__notifyMutation('childList', this._nid, [], [c._nid], null, null,
+          _mvPrev ? _mvPrev._nid : null, _mvNext ? _mvNext._nid : null);
+        globalThis.__notifyMutation('childList', this._nid, [c._nid], [], null, null,
+          c.previousSibling ? c.previousSibling._nid : null,
+          c.nextSibling ? c.nextSibling._nid : null);
+      } else {
+        globalThis.__notifyMutation('childList', this._nid, [c._nid], [], null, null,
+          c.previousSibling ? c.previousSibling._nid : null,
+          c.nextSibling ? c.nextSibling._nid : null);
+      }
+    }
+    if (_isMove) globalThis.__moSuppressTarget = null;
     __prepareInsertedSubtree(c);
     if (c instanceof Element && c.tagName === 'LINK') {
       _loadLinkedStylesheet(c);
@@ -2025,7 +2135,10 @@ class Node {
     return c;
   }
   removeChild(c) {
-    if (!c || c.parentNode !== this) {
+    if (!c || c._nid === undefined || c._nid === null) {
+      throw new TypeError("Failed to execute 'removeChild' on 'Node': parameter 1 is not of type 'Node'.");
+    }
+    if (c.parentNode !== this) {
       throw new DOMException(
         "Failed to execute 'removeChild' on 'Node': The node to be removed is not a child of this node.",
         'NotFoundError'
@@ -2040,6 +2153,8 @@ class Node {
       _linkedStylesheetNodes.delete(c);
     }
     const parentConnected = this.isConnected;
+    // 邻居必须在树移除前抓(移除后 c.previousSibling 即为 null)
+    const _mPrev = c.previousSibling, _mNext = c.nextSibling;
     const removed = _dom("remove_child", c._nid) === "true";
     if (!removed) {
       throw new DOMException(
@@ -2051,7 +2166,10 @@ class Node {
     _seedDetachedTreeState(c);
     _detachStyleSheetsInSubtree(c);
     _reconcileWindowNamedProperties(removedWindowNames);
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [], [c._nid]);
+    if (globalThis.__mutationObservers?.length) {
+      globalThis.__notifyMutation('childList', this._nid, [], [c._nid], null, null,
+        _mPrev ? _mPrev._nid : null, _mNext ? _mNext._nid : null);
+    }
     return c;
   }
   replaceChild(newChild, oldChild) {
@@ -2069,8 +2187,21 @@ class Node {
       this.removeChild(oldChild);
       return oldChild;
     }
+    const _rcPrev = newChild.previousSibling, _rcNext = newChild.nextSibling;
+    const _rcWasChild = newChild.parentNode === this;
+    if (_rcWasChild) globalThis.__moSuppressTarget = this._nid;
     if (newChild._shadowParent) newChild._shadowParent.removeChild(newChild);
     else if (newChild.parentNode) _detachStyleSheetsInSubtree(newChild);
+    if (_rcWasChild) {
+      // spec/Chrome:同父兄弟替换,先摘 newChild —— 通知①(removed new,
+      // 邻居为摘除前位置)
+      globalThis.__moSuppressTarget = null;
+      if (globalThis.__mutationObservers?.length) {
+        globalThis.__notifyMutation('childList', this._nid, [], [newChild._nid], null, null,
+          _rcPrev ? _rcPrev._nid : null, _rcNext ? _rcNext._nid : null);
+      }
+      globalThis.__moSuppressTarget = this._nid;
+    }
     const parentConnected = this.isConnected;
     const removedWindowNames = _windowNamedNamesInTree(oldChild);
     const inserted = _dom("insert_before", newChild._nid, oldChild._nid) === "true";
@@ -2088,10 +2219,13 @@ class Node {
     _detachStyleSheetsInSubtree(oldChild);
     _registerWindowNamedTree(newChild);
     _reconcileWindowNamedProperties(removedWindowNames);
+    if (_rcWasChild) globalThis.__moSuppressTarget = null;
     // As in appendChild and removeChild. A replacement is an insertion and a removal. An
     // observer saw neither so far.
     if (globalThis.__mutationObservers?.length) {
-      globalThis.__notifyMutation('childList', this._nid, [newChild._nid], [oldChild._nid]);
+      const _mPrev = oldChild.previousSibling, _mNext = oldChild.nextSibling;
+      globalThis.__notifyMutation('childList', this._nid, [newChild._nid], [oldChild._nid], null, null,
+        _mPrev ? _mPrev._nid : null, _mNext ? _mNext._nid : null);
     }
     __prepareInsertedSubtree(newChild);
     if (newChild instanceof Element && newChild.tagName === 'LINK') {
@@ -2100,20 +2234,57 @@ class Node {
     return oldChild;
   }
   insertBefore(n, ref) {
-    if (!n) return n;
-    if (!ref) { this.appendChild(n); return n; }
+    // WebIDL:insertBefore(node, child) 两个参数都必需(WPT 断言缺参抛
+    // TypeError);显式传 undefined/null 的 ref 视为 append。
+    if (arguments.length < 2) {
+      throw new TypeError("Failed to execute 'insertBefore' on 'Node': 2 arguments required, but only " + arguments.length + " present.");
+    }
+    if (!n || n._nid === undefined || n._nid === null) {
+      throw new TypeError("Failed to execute 'insertBefore' on 'Node': parameter 1 is not of type 'Node'.");
+    }
+    if (ref != null && (typeof ref !== 'object' || ref._nid === undefined || ref._nid === null)) {
+      throw new TypeError("Failed to execute 'insertBefore' on 'Node': parameter 2 is not of type 'Node'.");
+    }
+    _validateParentForInsertion(this);
+    if (_isInclusiveAncestor(n, this)) {
+      throw new DOMException(
+        "Failed to execute 'insertBefore' on 'Node': The new child is an ancestor of the node.",
+        "HierarchyRequestError",
+      );
+    }
+    if (ref == null) { this.appendChild(n); return n; }
     if (ref.parentNode !== this) {
       throw new DOMException(
         "Failed to execute 'insertBefore' on 'Node': The reference node is not a child of this node.",
         "NotFoundError",
       );
     }
+    _validateNodeContent(this, n, ref);
     if (n === ref) return n;
     if (n instanceof DocumentFragment) {
+      // spec:fragment 插入=单条 record(addedNodes=全部子,锚点=ref 前后)
       const children = Array.from(n.childNodes);
-      for (const child of children) this.insertBefore(child, ref);
+      if (!children.length) return n;
+      const refPrev = ref.previousSibling;
+      const added = [];
+      globalThis.__moSuppressTarget = 'all';
+      try {
+        for (const child of children) { this.insertBefore(child, ref); added.push(child._nid); }
+      } finally { globalThis.__moSuppressTarget = null; }
+      if (globalThis.__mutationObservers?.length && added.length) {
+        globalThis.__notifyMutation('childList', this._nid, added, [], null, null,
+          refPrev ? refPrev._nid : null, ref._nid);
+        if (children.length) {
+          globalThis.__notifyMutation('childList', n._nid, [],
+            children.map(function(ch) { return ch._nid; }));
+        }
+      }
       return n;
     }
+    const _isMove = n.parentNode === this;
+    const _mvPrev = _isMove ? n.previousSibling : null;
+    const _mvNext = _isMove ? n.nextSibling : null;
+    if (_isMove) globalThis.__moSuppressTarget = this._nid;
     if (n._shadowParent) n._shadowParent.removeChild(n);
     else if (n.parentNode) _detachStyleSheetsInSubtree(n);
     const parentConnected = this.isConnected;
@@ -2129,7 +2300,21 @@ class Node {
     _registerWindowNamedTree(n);
     // The same steps as in appendChild. Where a node is inserted does not decide whether an
     // observer sees it and whether a <link> loads its stylesheet.
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [n._nid], []);
+    if (globalThis.__mutationObservers?.length) {
+      if (_isMove) {
+        globalThis.__moSuppressTarget = null;
+        globalThis.__notifyMutation('childList', this._nid, [], [n._nid], null, null,
+          _mvPrev ? _mvPrev._nid : null, _mvNext ? _mvNext._nid : null);
+        globalThis.__notifyMutation('childList', this._nid, [n._nid], [], null, null,
+          n.previousSibling ? n.previousSibling._nid : null,
+          n.nextSibling ? n.nextSibling._nid : null);
+      } else {
+        globalThis.__notifyMutation('childList', this._nid, [n._nid], [], null, null,
+          n.previousSibling ? n.previousSibling._nid : null,
+          n.nextSibling ? n.nextSibling._nid : null);
+      }
+    }
+    if (_isMove) globalThis.__moSuppressTarget = null;
     __prepareInsertedSubtree(n);
     if (n instanceof Element && n.tagName === 'LINK') {
       _loadLinkedStylesheet(n);
@@ -2142,6 +2327,53 @@ class Node {
     const t = this.nodeType;
     if (t === 1) {
       return _wrap(+_dom("clone_node", this._nid, deep ? "true" : "false"));
+    }
+    if (t === 9) {
+      // Document 克隆(WPT implementation.createDocument/createHTMLDocument:
+      // check_copy 要求深克隆的副本与原同构)。Rust clone_node 泛型克隆
+      // NodeData::Document(独立树副本)。
+      const nid = +_dom("clone_node", this._nid, deep ? "true" : "false");
+      if (nid > 0) {
+        const copy = new Document(nid);
+        // 独立文档语义整体继承:contentType(URL/charset 断言)、
+        // _detachedDoc(title getter 走自身树;浅克隆无 <title> → ""),
+        // _docUrl(about:blank)、doctype 引用。
+        copy._contentType = this._contentType;
+        // 克隆的 document 是独立文档树:querySelector/getElementById 必须按
+        // 自身子树走(scoped),否则克隆链上的查询会命中主文档同 id 元素,
+        // 事件路径/testChain 的 wrapper 身份随之断裂。
+        copy._detachedDoc = true;
+        if (this._docUrl !== undefined) copy._docUrl = this._docUrl;
+        if (this._docType) copy._docType = this._docType;
+        copy._cacheGeneration = _cacheGen(nid);
+        _cachePut(nid, copy)
+        _stampOwnerDoc(copy, copy);
+        return copy;
+      }
+      return null;
+    }
+    if (t === 10) {
+      // DocumentType:Rust clone_node 泛型克隆 NodeData::Doctype;
+      // _shallowCloneNode 不认识 doctype(会返回 null)。
+      return _wrap(+_dom("clone_node", this._nid, "false"));
+    }
+    if (t === 11) {
+      // DocumentFragment:Rust 侧 fragment 用 NodeData::Document 表示,
+      // 泛型 clone 后 wrapper 会被 nodeType 判成 9。走 JS 结构克隆保住
+      // DocumentFragment 身份(spec:cloneNode 得 Fragment)。
+      const copy = _shallowCloneNode(this);
+      if (deep && copy) {
+        const stack = [[this, copy]];
+        while (stack.length) {
+          const [src, dst] = stack.pop();
+          const kids = src.childNodes;
+          for (let i = 0; i < kids.length; i++) {
+            const c = _shallowCloneNode(kids[i]);
+            if (c) { dst.appendChild(c); stack.push([kids[i], c]); }
+          }
+        }
+      }
+      return copy;
     }
     // Clone structurally via real DOM nodes rather than round-tripping through a
     // throwaway <div>.innerHTML: the fragment parser discards elements that are
@@ -2200,27 +2432,41 @@ class Node {
   get isConnected() {
     if (this._treeDetachedExact) return false;
     if (this._treeConnectedEpoch === _treeMutationEpoch) return this._treeConnected;
-    const connected = _dom("is_connected", this._nid) === "true";
+    // spec:isConnected = shadow-including root 是 Document。跨 realm 的
+    // 节点(iframe 文档里的)在主 realm 的树上查不到,is_connected op 恒
+    // false —— 用 root 遍历判定,root.nodeType === 9 即连接。
+    let root = this;
+    while (root.parentNode) root = root.parentNode;
+    const connected = root.nodeType === 9
+      || _dom("is_connected", this._nid) === "true";
     this._treeConnected = connected;
     this._treeConnectedEpoch = _treeMutationEpoch;
     return connected;
   }
   normalize() {
-    // Merge adjacent exclusive Text nodes, drop empty ones, recurse. Detached
-    // removed nodes keep their own data (read from the backing node by nid).
+    // WHATWG/WPT 语义(WPT Node-normalize 19837 用例):连续 exclusive Text
+    // 组里保留"第一个非空"节点并把全组数据并入;整组全空则全部移除。
+    // (保留第一个的实现会让 [""、"a"、""] 规范化成 [""],与 Chrome 相反。)
     let child = this.firstChild;
     while (child) {
-      const next = child.nextSibling;
       if (child.nodeType === 3) {
-        let data = child.data, sib = child.nextSibling;
-        while (sib && sib.nodeType === 3) { const after = sib.nextSibling; data += sib.data; this.removeChild(sib); sib = after; }
-        if (data.length === 0) { this.removeChild(child); child = sib; continue; }
-        if (data !== child.data) child.data = data;
-        child = sib; continue;
+        const group = [child];
+        let sib = child.nextSibling;
+        while (sib && sib.nodeType === 3) { group.push(sib); sib = sib.nextSibling; }
+        const keeper = group.find(function(n) { return n.data.length > 0; });
+        const data = group.map(function(n) { return n.data; }).join('');
+        for (const n of group) { if (n !== keeper) this.removeChild(n); }
+        if (keeper) {
+          if (keeper.data !== data) keeper.data = data;
+          child = keeper.nextSibling;
+        } else {
+          child = sib;
+        }
+        continue;
       } else if (child.nodeType === 1 || child.nodeType === 11) {
         child.normalize();
       }
-      child = next;
+      child = child.nextSibling;
     }
   }
   isEqualNode(other) {
@@ -3045,6 +3291,13 @@ class Element extends Node {
     this._nsCache = ns;
     return ns;
   }
+  get prefix() {
+    // Per DOM spec: the prefix of an element created via createElement is
+    // null (no namespace prefix). For createElementNS with a qualified
+    // name like "svg:rect", the prefix is "svg".
+    if (this._prefix !== undefined) return this._prefix;
+    return null;
+  }
   // `inner_html` resolves a <template> to its contents document on the Rust
   // side (issue #463), so this needs no template special case.
   get innerHTML() { return _domParse("inner_html", this._nid) ?? ""; }
@@ -3081,7 +3334,36 @@ class Element extends Node {
     }
   }
   get outerHTML() { return _domParse("outer_html", this._nid) ?? ""; }
-  get innerText() { return this.textContent; }
+  set outerHTML(v) {
+    // spec:parent 为空 → 静默;否则 fragment 解析(上下文=parent)+ 节点
+    // 逐个插到 this 之前 + 移除 this。id/命名属性走 createElement/set_attribute
+    // 的常规链(id index 自动更新,getElementById 依赖)。
+    const parent = this.parentNode;
+    if (!parent) return;
+    const kids = _parseHTMLFragment(String(v), parent) || [];
+    for (const k of kids) parent.insertBefore(k, this);
+    parent.removeChild(this);
+  }
+  get innerText() {
+    // 浏览器语义:innerText 只含"渲染出来的"文本——script/style/template/
+    // head 等不渲染的子树整个排除,块级元素边界产生换行。
+    const hidden = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1, HEAD: 1, META: 1, LINK: 1, TITLE: 1 };
+    const blocks = { DIV: 1, P: 1, BR: 1, LI: 1, TR: 1, H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, SECTION: 1, ARTICLE: 1, HEADER: 1, FOOTER: 1, NAV: 1, UL: 1, OL: 1, TABLE: 1, BLOCKQUOTE: 1, PRE: 1, FORM: 1 };
+    const out = [];
+    const walk = (node) => {
+      if (node.nodeType === 3) { out.push(node.nodeValue); return; }
+      if (node.nodeType !== 1) return;
+      const tag = (node.tagName || '').toUpperCase();
+      if (hidden[tag]) return;
+      if (node.tagName === 'BR') { out.push('\n'); return; }
+      const kids = node.childNodes;
+      for (let i = 0; i < kids.length; i++) walk(kids[i]);
+      if (blocks[tag]) out.push('\n');
+    };
+    const kids = this.childNodes;
+    for (let i = 0; i < kids.length; i++) walk(kids[i]);
+    return out.join('').replace(/\n{3,}/g, '\n\n').trim();
+  }
   set innerText(v) { this.textContent = v; }
   get children() {
     const ids = _domParse("element_children", this._nid) || [];
@@ -3104,7 +3386,7 @@ class Element extends Node {
       if (nid >= 0) {
         // Cache by node id so `.content` keeps a stable identity across reads —
         // frameworks stash the fragment and compare it later.
-        if (!_cache.has(nid)) _cache.set(nid, new DocumentFragment(nid));
+        if (!_cache.has(nid)) _cachePut(nid, new DocumentFragment(nid))
         const content = _cache.get(nid);
         content._fragmentContext = 'template';
         return content;
@@ -3195,6 +3477,10 @@ class Element extends Node {
       if (value && value !== "about:blank") this._loadIframeSrc(value);
       else this._resetIframeFrame();
     }
+    // Handle iframe.srcdoc: parse HTML and execute scripts
+    if (n === "srcdoc" && this.localName === "iframe") {
+      this._loadIframeSrcdoc(value);
+    }
     if (this._nullNamespaceAttrs instanceof Map) {
       this._nullNamespaceAttrs.set(n, value);
     }
@@ -3274,12 +3560,19 @@ class Element extends Node {
     return this._attributes;
   }
   getAttributeNS(ns, n) { return _domParse("get_attribute_ns", this._nid, String(ns == null ? "" : ns) + "\0" + String(n)); }
-  querySelector(s) { return _wrapEl(+_dom("query_selector_scoped", this._nid, s)); }
-  querySelectorAll(s) {
-    const ids = _domParse("query_selector_all_scoped", this._nid, s) || [];
-    return _nodeList(ids.map(_wrapEl).filter(Boolean));
+  querySelector(s) {
+    if (arguments.length < 1) throw new TypeError("Failed to execute 'querySelector': 1 argument required, but only 0 present.");
+    return _wrapEl(_qsSingleScoped(this._nid, _qsCheckSelector(String(s))));
   }
-  getElementsByTagName(t) { return HTMLCollection._from(this.querySelectorAll(t)); }
+  querySelectorAll(s) {
+    if (arguments.length < 1) throw new TypeError("Failed to execute 'querySelectorAll': 1 argument required, but only 0 present.");
+    return _nodeList(_qsScopedAll(this._nid, _qsCheckSelector(String(s))).map(_wrapEl).filter(Boolean));
+  }
+  getElementsByTagName(t) {
+    var tag = String(t);
+    if (tag === '*') return HTMLCollection._from(this.querySelectorAll('*'));
+    return _liveElementsByTagName(this, tag);
+  }
   getElementsByClassName(c) { return _getElementsByClassName(this, c); }
   matches(s) {
     // :popover-open is a JS-observable popover state, not understood by the
@@ -3302,9 +3595,21 @@ class Element extends Node {
     return _dom("matches_selector", this._nid, String(s)) === "true";
   }
   closest(s) {
+    // spec::scope 在 closest 中指**调用起点**(逐祖先 matches 时 scope 恒定,
+    // 不随被测元素漂移)。Rust 侧提供固定 scope 的匹配 op;带 :scope 的选择器
+    // 走该路径,其余仍走通用 matches(避免热路径回归)。
+    const fixed = typeof s === "string" && s.indexOf(":scope") !== -1;
     let el = this;
     while (el) {
-      if (el.nodeType === 1 && el.matches && el.matches(s)) return el;
+      if (el.nodeType === 1) {
+        let hit = false;
+        if (fixed) {
+          hit = _dom("matches_with_scope", el._nid, this._nid + "\0" + String(s)) === "true";
+        } else if (el.matches) {
+          hit = el.matches(s);
+        }
+        if (hit) return el;
+      }
       el = el.parentNode;
     }
     return null;
@@ -3357,6 +3662,11 @@ class Element extends Node {
       case 'afterend':
         if (parent) parent.insertBefore(node, this.nextSibling);
         break;
+      default:
+        throw new DOMException(
+          "Failed to execute 'insertAdjacentText' on 'Element': The value provided ('" + position + "') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.",
+          "SyntaxError"
+        );
     }
   }
   // Returns the inserted element, or null for beforebegin/afterend when this
@@ -3379,46 +3689,103 @@ class Element extends Node {
         parent.insertBefore(element, this.nextSibling);
         return element;
     }
-    return null;
+    // spec:无法识别的 position 抛 SyntaxError(与 insertAdjacentHTML 一致)
+    throw new DOMException(
+      "Failed to execute 'insertAdjacentElement' on 'Element': The value provided ('" + position + "') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.",
+      "SyntaxError"
+    );
   }
   addEventListener(type, handler, opts) {
-    const key = this._nid;
-    if (!_eventRegistry[key]) _eventRegistry[key] = {};
-    if (!_eventRegistry[key][type]) _eventRegistry[key][type] = [];
-    _eventRegistry[key][type].push(handler);
+    // Servo 对齐(eventtarget.rs AddEventListenerOptions):capture/once/
+    // passive/signal 全语义,listener entry 结构与 Node 侧共享。
+    _eventTargetAdd(this, type, handler, opts);
   }
-  removeEventListener(type, handler) {
-    const key = this._nid;
-    if (_eventRegistry[key] && _eventRegistry[key][type]) {
-      _eventRegistry[key][type] = _eventRegistry[key][type].filter(h => h !== handler);
-    }
+  removeEventListener(type, handler, opts) {
+    _eventTargetRemove(this, type, handler, opts);
   }
   dispatchEvent(event) {
-    if (!event) return true;
-    if (!event.target) event.target = this;
-    event.currentTarget = this;
-    // Spec: inline `onclick="..."` content attributes are event handlers
-    // for the matching event type. Fire them alongside any
-    // addEventListener handlers. Also honor the IDL property
-    // `el.onclick = fn` if set. Without this, b.click() never invokes
-    // the inline handler and forms with onsubmit / buttons with onclick
-    // are silently dead.
-    const handlerName = 'on' + event.type;
-    const inlineFn = this[handlerName] || this._resolveInlineHandler(handlerName);
-    if (typeof inlineFn === 'function') {
-      try {
-        const ret = inlineFn.call(this, event);
-        if (ret === false) event.preventDefault();
-      } catch(e) { console.error(e); }
+    // DOM spec dispatch 算法(eventtarget.rs dispatch_event):
+    // 构建 event path(root → this),CAPTURING 从外向内,AT_TARGET 与
+    // BUBBLING 从内向外;inline handler 在 target 阶段按注册序最后触发;
+    // 冒泡终点是 window。React 19 的委托依赖该语义(root 上 capture+
+    // bubble listener 组合)。
+    if (!event || typeof event.type === "undefined") {
+      throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': parameter 1 is not of type 'Event'.");
     }
-    const handlers = (_eventRegistry[this._nid] || {})[event.type] || [];
-    for (const h of handlers) {
-      try { h.call(this, event); } catch(e) { console.error(e); }
-      if (event._immediatePropagationStopped) break;
+    // spec:dispatch 期间再次 dispatch 同一 event 应抛 InvalidStateError。
+    // 宿主管线(Rust DCL/load 循环)会让同一 Event 连续派发到 document 和
+    // window —— 静默容忍(真实浏览器行为等价于两次独立派发)。
+    event._isBeingDispatched = true;
+    event.target = this;
+    event.eventPhase = 2;
+    // event path:ancestors 外→内(inclusive of this),再加 window。
+    const eventWindow = globalThis;
+    const path = [];
+    let node = this;
+    while (node) {
+      path.unshift(node);
+      node = node.parentNode;
     }
-    if (event.bubbles && !event._propagationStopped && this.parentNode) {
-      this.parentNode.dispatchEvent(event);
+    // spec:event path 的根是 window(target 树根为 document 时);window 上
+    // 的 capture/bubble listener 参与分发(链首捕获、链尾冒泡)。
+    if (path.length && path[0] === (globalThis.document || null)) {
+      path.unshift(eventWindow);
     }
+    const type = String(event.type);
+    const invoke = (listenerTarget, phase) => {
+      event.currentTarget = listenerTarget;
+      event.eventPhase = phase;
+      const byType = _eventTargetListeners.get(listenerTarget);
+      const entryList = (byType && byType.get(type) ? byType.get(type) : []).slice();
+      // inline handler(AT_TARGET only,在注册 listener 之后;spec:event
+      // handler 也在 listener list 尾部)
+      if (phase === 2 && listenerTarget === this) {
+        const handlerName = 'on' + type;
+        const inlineFn = this[handlerName] || this._resolveInlineHandler(handlerName);
+        if (typeof inlineFn === 'function') {
+          try {
+            const ret = inlineFn.call(this, event);
+            if (ret === false && event.cancelable) event.preventDefault();
+          } catch (e) { console.error(e); }
+          if (event._immediatePropagationStopped) return;
+        }
+      }
+      for (const entry of entryList) {
+        if (entry.removed) continue;
+        // spec:target 自身上 capture 与 bubble listener 都触发(单一
+        // AT_TARGET 遍历,按注册序);祖先上 capture 仅捕获阶段、bubble 仅
+        // 冒泡阶段。
+        const wantCapture = entry.capture && phase !== 3;
+        const wantBubble = !entry.capture && phase !== 1;
+        if (!wantCapture && !wantBubble) continue;
+        if (entry.once) _eventTargetRemove(listenerTarget, type, entry.callback, entry.capture);
+        try {
+          if (typeof entry.callback === "function") entry.callback.call(listenerTarget, event);
+          else entry.callback.handleEvent.call(entry.callback, event);
+        } catch (e) { console.error(e); }
+        if (event._immediatePropagationStopped) return;
+      }
+    };
+    // CAPTURING(根 → 父)
+    if (path.length > 1) {
+      event.eventPhase = 1;
+      for (let i = 0; i < path.length - 1 && !event._propagationStopped; i++) {
+        invoke(path[i], 1);
+      }
+    }
+    // AT_TARGET + BUBBLING(this → window)
+    if (!event._propagationStopped) invoke(this, 2);
+    if (event.bubbles && !event._propagationStopped) {
+      // path[0] = 树根(document 或 window)。window 的冒泡由尾部显式
+      // invoke 处理(path 构造时根是 window 的场合);document 根在这里
+      // 完成冒泡(WPT clone/new Document 链:根的 bubble listener 必须触发)。
+      for (let i = path.length - 2; i >= 0 && !event._propagationStopped; i--) {
+        invoke(path[i], 3);
+      }
+    }
+    event.currentTarget = null;
+    event.eventPhase = 0;
+    event._isBeingDispatched = false;
     return !event.defaultPrevented;
   }
   _resolveInlineHandler(name) {
@@ -3887,7 +4254,13 @@ class Element extends Node {
   set src(v) {
     this.setAttribute("src", v);
   }
-  _resetIframeFrame() {
+  get srcdoc() {
+    return this.getAttribute("srcdoc") || "";
+  }
+  set srcdoc(v) {
+    this.setAttribute("srcdoc", v);
+  }
+  _resetIframeFrame(skipRealm) {
     const oldId = this._frameId;
     if (oldId) {
       delete globalThis.__obscura_frameElements[oldId];
@@ -3895,59 +4268,86 @@ class Element extends Node {
     }
     this._frameId = 0;
     this._iframeLoadingUrl = null;
-    this._iframeDoc = new _IframeDocument(
-      '<!DOCTYPE html><html><head></head><body></body></html>', 'about:blank', this);
-    this._iframeWin = new _IframeWindow(this._iframeDoc, 'about:blank');
+    const blankHtml = '<!DOCTYPE html><html><head></head><body></body></html>';
+    // about:blank iframe 也要有真实 realm:CF Turnstile 等脚本创建
+    // about:blank 探测 iframe 并往 contentDocument 里写内容做环境探测,
+    // 纯 JS 假 shim 文档会让写入静默无效 → 探测失败 → 挑战永远不加载。
+    // (真正要加载 src/srcdoc 的路径由调用方传 skipRealm 跳过,避免排队
+    // 一个立刻作废的空 realm。)
+    const el = this;
+    if (!skipRealm) {
+      try {
+        const box = el.getBoundingClientRect();
+        el._frameId = Deno.core.ops.op_frame_document_ready(
+          'about:blank', blankHtml, Math.round(box.width) || 300, Math.round(box.height) || 150);
+        if (el._frameId) globalThis.__obscura_frameElements[el._frameId] = el;
+      } catch (e) { /* realm 排队失败则退回 shim 文档 */ }
+    }
+    el._iframeDoc = new _IframeDocument(blankHtml, 'about:blank', el);
+    el._iframeWin = new _IframeWindow(el._iframeDoc, 'about:blank');
+    if (el._frameId) {
+      el._iframeWin._frameId = el._frameId;
+      globalThis.__obscura_frameWindows[el._frameId] = el._iframeWin;
+      globalThis.__obscura_frameElements[el._frameId] = el;
+    }
   }
+  _loadIframeSrcdoc(srcdoc) {
+    // Handle iframe.srcdoc: pass HTML to host which creates a frame realm
+    // and runs the scripts in the frame's own V8 context.
+    // The host (op_frame_document_ready) queues a PendingFrame, which
+    // advance_frames (called after Runtime.evaluate via our CDP fix) processes:
+    // it creates a FrameRealm, parses the HTML, fetches external scripts,
+    // and runs them in the frame's own V8 context.
+    this._resetIframeFrame(true);
+    const url = 'about:srcdoc';
+    const el = this;
+    const box = el.getBoundingClientRect();
+    el._frameId = Deno.core.ops.op_frame_document_ready(
+      url, srcdoc, Math.round(box.width) || 300, Math.round(box.height) || 150);
+    if (el._frameId) globalThis.__obscura_frameElements[el._frameId] = el;
+    el._iframeDoc = new _IframeDocument(srcdoc, url, el);
+    el._iframeWin = new _IframeWindow(el._iframeDoc, url);
+    if (el._frameId) {
+      el._iframeWin._frameId = el._frameId;
+      globalThis.__obscura_frameWindows[el._frameId] = el._iframeWin;
+      globalThis.__obscura_frameElements[el._frameId] = el;
+    }
+    el.dispatchEvent(new Event('load'));
+  }
+
   _loadIframeSrc(url) {
     let fullUrl = url;
     if (!url.includes('://')) {
       try { fullUrl = new URL(url, _domParse("document_url") || "about:blank").href; } catch(e) {}
     }
-    // Both the src setter and the parser sweep in __obscura_init reach here, so
-    // a frame the page assigned before init must not be fetched a second time.
     if (this._iframeLoadingUrl === fullUrl) return;
-    this._resetIframeFrame();
+    this._resetIframeFrame(true);
     this._iframeLoadingUrl = fullUrl;
     const el = this;
-    fetch(fullUrl, {mode: 'no-cors'}).then(async resp => {
-      if (el._iframeLoadingUrl !== fullUrl) return;
-      if (resp.ok || resp.type === 'opaque') {
-        const html = await resp.text();
-        // Hand the document to the host, which gives this frame a realm of its
-        // own and runs the scripts that came with it (issue #600). The shim
-        // document below stays: it is what the parent reads through
-        // contentDocument.
-        const box = el.getBoundingClientRect();
-        el._frameId = Deno.core.ops.op_frame_document_ready(
-          fullUrl, html, Math.round(box.width) || 300, Math.round(box.height) || 150);
-        if (el._frameId) globalThis.__obscura_frameElements[el._frameId] = el;
-        el._iframeDoc = new _IframeDocument(html, fullUrl, el);
-        el._iframeWin = new _IframeWindow(el._iframeDoc, fullUrl);
-        // Bind the window to the realm the host just queued. This is what makes
-        // posting into the frame reach the frame's own listeners, and makes a
-        // message coming back out arrive with this window as its `source`.
-        if (el._frameId) {
-          el._iframeWin._frameId = el._frameId;
-          globalThis.__obscura_frameWindows[el._frameId] = el._iframeWin;
-          globalThis.__obscura_frameElements[el._frameId] = el;
-        }
-      } else {
-        el._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', fullUrl, el);
-        el._iframeWin = new _IframeWindow(el._iframeDoc, fullUrl);
+    // 浏览器语义:iframe 文档由宿主网络栈加载(带 cookies、Sec-Fetch-Dest:
+    // iframe、响应无 CORS 检查)。不能用 JS fetch(mode:'no-cors')——opaque
+    // 响应读不出 body,跨域 frame 会拿到空文档(CF 挑战等所有跨域 iframe
+    // 因此哑火)。宿主取回文档并建好 realm 后,advance_frames 派发 load。
+    try {
+      const box = el.getBoundingClientRect();
+      el._frameId = Deno.core.ops.op_frame_navigate(
+        fullUrl, Math.round(box.width) || 300, Math.round(box.height) || 150);
+      if (el._frameId) {
+        globalThis.__obscura_frameElements[el._frameId] = el;
+        // 浏览器语义:iframe 是阻塞 window load 的资源。排队到宿主取回
+        // 完成前,推迟 load 事件(page.rs 的 advance 周期会等这个计数归零)。
+        __dynLoadDelayingPending++;
+        el._iframeLoadDelay = true;
       }
-
-      // Dispatch through the element so the onload property/attribute and any
-      // addEventListener('load', ...) listeners all run. Calling el.onload()
-      // directly bypasses listeners registered via addEventListener.
-      el.dispatchEvent(new Event('load'));
-    }).catch(() => {
-      if (el._iframeLoadingUrl !== fullUrl) return;
-      el._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', fullUrl, el);
-      el._iframeWin = new _IframeWindow(el._iframeDoc, fullUrl);
-
-      el.dispatchEvent(new Event('load'));
-    });
+    } catch (e) { /* 排队失败保持 0,回落 shim 文档 */ }
+    if (el._frameId) {
+      el._iframeWin._frameId = el._frameId;
+      globalThis.__obscura_frameWindows[el._frameId] = el._iframeWin;
+      globalThis.__obscura_frameElements[el._frameId] = el;
+    }
+    // load 事件不在这里派发:文档还在宿主侧取回中。宿主建好 realm 并跑完
+    // frame 脚本后(page.rs attach_pending_frames)才给父页 iframe 元素派发
+    // load——提前派发会让父页 init 在空文档上跑(querySelector-All 套件)。
   }
   get contentDocument() {
     if (this.localName !== 'iframe') return undefined;
@@ -3962,8 +4362,10 @@ class Element extends Node {
       return null; // Cross-origin: blocked
     }
     if (!this._iframeDoc) {
-      this._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', 'about:blank', this);
-      this._iframeWin = new _IframeWindow(this._iframeDoc, 'about:blank');
+      // 首次访问 contentDocument:排队一个真实的 about:blank realm。
+      // CF Turnstile 等脚本创建无 src 的 iframe 后直接 contentDocument.write()
+      // 写入挑战内容——纯 JS shim 文档会让写入/脚本执行静默无效。
+      this._resetIframeFrame();
     }
     return this._iframeDoc;
   }
@@ -4575,10 +4977,24 @@ class Element extends Node {
     }
   }
   replaceChildren(...nodes) {
+    // spec "replace all":目标 parent 的移除+插入合并为**一条** record;
+    // 跨父移动的旧 parent 仍是每节点一条(appendChild 内部处理)。
     const converted = _convertNodes(nodes);
+    const removed = [];
     let c;
-    while ((c = this.firstChild)) this.removeChild(c);
-    for (const n of converted) this.appendChild(n);
+    globalThis.__moSuppressTarget = this._nid;
+    try {
+      while ((c = this.firstChild)) { removed.push(c._nid); this.removeChild(c); }
+    } finally { globalThis.__moSuppressTarget = null; }
+    if (converted.length) {
+      globalThis.__moSuppressTarget = this._nid;
+      try { for (const n of converted) this.appendChild(n); }
+      finally { globalThis.__moSuppressTarget = null; }
+      if (globalThis.__mutationObservers?.length) {
+        globalThis.__notifyMutation('childList', this._nid,
+          converted.map(function(n) { return n._nid; }), removed);
+      }
+    }
   }
 }
 
@@ -4805,6 +5221,21 @@ function _throwDocumentDomainSecurityError() {
 }
 
 class Document extends Node {
+  constructor(nid) {
+    if (nid === undefined || nid === null) {
+      // WHATWG `new Document()`:空的独立 XML 文档,0 个子节点。
+      // 之前 nid 为 undefined 时所有 _dom 调用都会落到全局文档上
+      // (childNodes 返回全局文档的 doctype+html)。
+      super(+_dom("create_document"));
+      this._contentType = "application/xml";
+      this._detachedDoc = true;
+    } else {
+      super(nid);
+    }
+    // 注册进包装缓存:父链游走(_wrap)必须能解析回同一个 Document 实例,
+    // 否则 ref.parentNode === this / s.ownerDocument === doc 同一性断言失败。
+    if (!_cache.has(this._nid)) _cachePut(this._nid, this)
+  }
   get timeline() {
     if (!this._timeline) {
       this._timeline = new DocumentTimeline();
@@ -4815,7 +5246,16 @@ class Document extends Node {
     return Array.from(_waapiAnimations).filter(animation => animation.playState !== 'idle'
       && (animation.playState !== 'finished' || animation.effect?._timing.fill === 'forwards' || animation.effect?._timing.fill === 'both'));
   }
-  get documentElement() { return _wrapEl(+_dom("document_element")); }
+  get documentElement() {
+    if (this._detachedDoc) {
+      // new Document() 的 documentElement 从自己的子树找,不查全局文档。
+      for (let c = this.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 1) return c;
+      }
+      return null;
+    }
+    return _wrapEl(+_dom("document_element"));
+  }
   get children() {
     const root = this.documentElement;
     return HTMLCollection._from(root ? [root] : []);
@@ -4826,16 +5266,24 @@ class Document extends Node {
   get head() { return this.querySelector("head"); }
   get body() { return this.querySelector("body"); }
   get doctype() {
-    if (this._doctype !== undefined) return this._doctype;
-    const info = _domParse("document_doctype");
-    if (info && info.name) {
-      this._doctype = new DocumentType(info.nodeId, info.name, info.publicId || "", info.systemId || "");
-    } else {
-      this._doctype = null;
+    if (this._detachedDoc) {
+      // 独立文档:从自身子树找 doctype(全局 op 会拿到主文档的)。
+      for (let c = this.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 10) return c;
+      }
+      return null;
     }
-    return this._doctype;
+    const info = _domParse("document_doctype");
+    if (info && info.name) return _wrap(+info.nodeId);
+    return null;
   }
-  get title() { return _domParse("document_title") ?? ""; }
+  get title() {
+    if (this._detachedDoc) {
+      const t = this.querySelector("title");
+      return t ? (t.textContent || "") : "";
+    }
+    return _domParse("document_title") ?? "";
+  }
   set title(v) {
     const value = String(v);
     let title = this.querySelector("title");
@@ -4852,7 +5300,12 @@ class Document extends Node {
     }
     title.textContent = value;
   }
-  get URL() { return _domParse("document_url") ?? ""; }
+  get URL() {
+    // implementation.createDocument/createHTMLDocument 的独立文档 URL 固定
+    // about:blank(spec —— 与当前页无关),克隆副本继承。
+    if (this._docUrl !== undefined) return this._docUrl;
+    return _domParse("document_url") ?? "";
+  }
   get documentURI() { return this.URL; }
   get domain() {
     return this === globalThis.document
@@ -4913,60 +5366,128 @@ class Document extends Node {
   }
   get readyState() { return globalThis.__documentReadyState__ || 'complete'; }
   get currentScript() {
-    // Next.js / Turbopack chunk loader reads document.currentScript.src to
-    // derive its base path. page.rs sets __currentScriptNid before each
-    // <script> body runs and clears it after, mirroring real Chrome.
-    const nid = globalThis.__currentScriptNid;
-    return nid ? _wrapEl(+nid) : null;
+    // Servo 语义落地:栈顶必须正在执行且节点实时为 <script>;否则 null。
+    // 不经过 wrapper cache(历史上 cache 残留 select wrapper 曾把整页水合
+    // 判死)。Next.js 读 src、React 做 instanceof,两者都只需要一个当前
+    // script 的准确代表。
+    return _currentScriptLive();
   }
+
   get hidden() { return false; }
   get visibilityState() { return "visible"; }
-  getElementById(id) { return _wrapEl(+_dom("get_element_by_id", id)); }
-  querySelector(s) { return _wrapEl(+_dom("query_selector", s)); }
+  getElementById(id) {
+    // Per DOM spec: getElementById converts the argument to string.
+    // getElementById(null) → getElementById("null")
+    // getElementById(undefined) → getElementById("undefined")
+    // getElementById("") → returns element with id=""
+    var idStr = String(id);
+    // 独立/克隆文档:按自身子树查询(全局 op 只查主文档,克隆文档链断)。
+    if (this._detachedDoc) {
+      return _wrapEl(+_qsCheck(_dom("query_selector_scoped", this._nid, '[id="' + idStr.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"]')));
+    }
+    return _wrapEl(+_dom("get_element_by_id", idStr));
+  }
+  querySelector(s) {
+    if (arguments.length < 1) throw new TypeError("Failed to execute 'querySelector': 1 argument required, but only 0 present.");
+    // WebIDL DOMString:null→"null"、undefined→"undefined"(WPT 特值断言依赖)
+    const q = String(s);
+    // 独立文档(new Document()/createHTMLDocument/createDocument)按自身
+    // 子树查询;全局版会查到主文档上。
+    if (this._detachedDoc) return _wrapEl(+_qsCheck(_dom("query_selector_scoped", this._nid, q)));
+    return _wrapEl(+_qsCheck(_dom("query_selector", q)));
+  }
   querySelectorAll(s) {
-    const ids = _domParse("query_selector_all", s) || [];
+    if (arguments.length < 1) throw new TypeError("Failed to execute 'querySelectorAll': 1 argument required, but only 0 present.");
+    const q = _qsCheckSelector(String(s));
+    // 先查原始串里的 !SYNTAX_ERR 标记再 JSON.parse:_domParse 会把标记
+    // 吞成 null,解析错误就永远抛不出去(Invalid character 类失败)
+    if (this._nid !== undefined && this._nid !== null) {
+      // 任何有真实节点的 Document(全局文档 + frame realm 文档 + 独立文档)
+      // 都走 scoped 查询:先查 !SYNTAX_ERR 标记再 JSON.parse(_domParse 会
+      // 把标记吞成 null,Invalid character 类解析错误就抛不出去)
+      const raw = _dom("query_selector_all_scoped", this._nid, q);
+      _qsCheck(raw);
+      const ids = _domParse("query_selector_all_scoped", this._nid, q) || [];
+      return _nodeList(ids.map(_wrapEl).filter(Boolean));
+    }
+    const raw = _dom("query_selector_all", q);
+    _qsCheck(raw);
+    const ids = _domParse("query_selector_all", q) || [];
     return _nodeList(ids.map(_wrapEl).filter(Boolean));
   }
-  getElementsByTagName(t) { return HTMLCollection._from(this.querySelectorAll(t)); }
+  getElementsByTagName(t) {
+    var tag = String(t);
+    if (tag === '*') return HTMLCollection._from(this.querySelectorAll('*'));
+    return _liveElementsByTagName(this, tag);
+  }
   getElementsByClassName(c) { return _getElementsByClassName(this, c); }
   getElementsByName(name) { return this.querySelectorAll('[name="' + String(name).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]'); }
   evaluate(expression, contextNode, namespaceResolver, type, result) {
     return _makeXPathResult(type, _xpathFindNodes(expression, contextNode || this));
   }
   createElement(t) {
-    const localName = String(t).toLowerCase();
+    // DOM spec: createElement validates the name as an XML Name (all
+    // document types) — "<div>"/"1foo" throw InvalidCharacterError.
+    // HTML documents then lowercase the tag with ASCII-only folding;
+    // non-ASCII characters like Ç are preserved.
+    const raw = String(t);
+    if (!_ns_isValidXmlName(raw)) {
+      throw new DOMException('Invalid character', 'InvalidCharacterError');
+    }
+    // spec:HTML 文档的 createElement 对 localName 做 ASCII 小写;
+    // XML/XHTML 文档保留原样(WPT "FOO" in XML/XHTML → localName "FOO")。
+    const docIsHtml = (this._contentType === "text/html")
+      || (this._contentType === undefined && this.contentType === "text/html");
+    const localName = docIsHtml
+      ? raw.replace(/[\x41-\x5a]/g, function(c) { return c.toLowerCase(); })
+      : raw;
     const nid = +_dom("create_element", localName);
+    // 命名空间按文档类型:XML/XHTML 文档创建的元素不在 HTML 命名空间
+    // (WPT:xhtml doc + createElement('div') → 非 HTMLElement、ns=xhtml)。
+    const thisIsHtml = (this._contentType === "text/html")
+      || (this._contentType === undefined && this.contentType === "text/html");
+    // DOM spec:HTML/XHTML 文档 → HTML ns;XML 文档 → null
+    const thisNs = (thisIsHtml || this._contentType === "application/xhtml+xml"
+      || this.contentType === "application/xhtml+xml")
+      ? "http://www.w3.org/1999/xhtml" : null;
     const C = _elementClassForKnownName(
-      "http://www.w3.org/1999/xhtml",
+      thisNs,
       localName,
     );
     const el = new C(nid);
+    // 新节点是 nid 的唯一真身:必须进 cache 并顶掉可能的孤儿条目(slot 复用
+    // 后 _wrap 的旧 wrapper 会与之身份分裂,React 的 fiber 挂载依赖唯一身份)。
+    el._cacheGeneration = _cacheGen(nid);
+    _cachePut(nid, el)
     // This node was just created from values already known to JS. Seed its
     // immutable metadata instead of rediscovering it through native calls in
     // hydration's tag/local-name checks.
-    el._tagName = localName.toUpperCase();
+    const htmlDocUpper = thisIsHtml;
+    // ASCII-only 大写(spec toASCIIUppercase):U+0131 等 Unicode 字母不能被
+    // 全 Unicode toUpperCase 变换(WPT "ınput" → 期望 "ıNPUT" 保留 ı)。
+    el._tagName = htmlDocUpper
+      ? localName.replace(/[\x61-\x7a]/g, function(c) { return c.toUpperCase(); })
+      : localName;
     el._lname = localName;
-    el._ns = "http://www.w3.org/1999/xhtml";
+    el._ns = thisNs;
     el._nullNamespaceAttrs = new Map();
     _seedDetachedTreeState(el);
-    _cache.set(nid, el);
+    _cachePut(nid, el)
     if (el && localName === 'template') {
       el._templateContent = this.createDocumentFragment();
       el._templateContent._fragmentContext = 'template';
     }
     const definition = globalThis.customElements?._registry?.get(localName);
     if (el && definition) globalThis.customElements._upgradeElement(el, definition);
-    return el;
+    return _stampOwnerDoc(el, this);
   }
   createElementNS(ns, t) {
     const namespace = ns == null ? null : String(ns);
     const qualified = String(t);
     _ns_validateQualifiedName(namespace == null ? "" : namespace, qualified);
-    if (namespace === "http://www.w3.org/1999/xhtml") {
-      const el = this.createElement(qualified);
-      if (el) el._ns = namespace;
-      return el;
-    }
+    // For HTML namespace, createElementNS preserves case (unlike
+    // createElement which lowercases). Use create_element_ns for all
+    // namespaces to keep the original qualified name.
     const nid = +_dom(
       "create_element_ns",
       (namespace == null ? "" : namespace) + "\0" + qualified,
@@ -4974,30 +5495,52 @@ class Document extends Node {
     const effectiveNamespace = namespace == null ? "" : namespace;
     const C = _elementClassForKnownName(effectiveNamespace, qualified);
     const el = new C(nid);
+    // 与 createElement 一致:新节点进 cache(唯一真身,防孤儿 wrapper 分裂)。
+    el._cacheGeneration = _cacheGen(nid);
+    _cachePut(nid, el)
     const localName = qualified.includes(":")
       ? qualified.slice(qualified.indexOf(":") + 1)
       : qualified;
-    el._tagName = qualified;
-    el._lname = localName;
+    // DOM Standard:createElementNS 后,HTML 命名空间且文档是 HTML → tagName
+    // ASCII 大写;其它命名空间保留原样(WPT: xhtml span → SPAN,test ns → span)。
+    let tagName = qualified;
+    const docIsHtml = (this._contentType === "text/html")
+      || (this._contentType === undefined && this.contentType === "text/html");
+    if (effectiveNamespace === "http://www.w3.org/1999/xhtml" && docIsHtml) {
+      const colon = qualified.indexOf(":");
+      const local = colon === -1 ? qualified : qualified.slice(colon + 1);
+      // HTML 文档的 tagName = localName 的 ASCII 大写(span → SPAN)
+      const upper = local.replace(/[\x61-\x7a]/g, function(c) { return c.toUpperCase(); });
+      const upperPrefix = colon === -1 ? "" : qualified.slice(0, colon).replace(/[\x61-\x7a]/g, function(c) { return c.toUpperCase(); });
+      tagName = colon === -1 ? upper : upperPrefix + ":" + upper;
+    }
+    // xhtml 命名空间的 localName/prefix 也做 ASCII 小写(HTML 文档):
+    let lname = localName;
+    let nprefix = qualified.includes(":") ? qualified.slice(0, qualified.indexOf(":")) : null;
+    // localName/prefix 保留原样(WPT:"SPAN" 输入 → localName="SPAN");
+    // 只有 tagName 做 ASCII 大写。
+    el._tagName = tagName;
+    el._lname = lname;
+    el._prefix = nprefix;
     el._ns = effectiveNamespace;
     el._nullNamespaceAttrs = new Map();
     _seedDetachedTreeState(el);
-    _cache.set(nid, el);
-    return el;
+    _cachePut(nid, el)
+    return _stampOwnerDoc(el, this);
   }
   createTextNode(t) {
     const nid = +_dom("create_text_node", String(t));
     const n = new Text(nid);
     _seedDetachedTreeState(n);
-    _cache.set(nid, n);
-    return n;
+    _cachePut(nid, n)
+    return _stampOwnerDoc(n, this);
   }
   createComment(t) {
     const nid = +_dom("create_comment_node", String(t ?? ""));
     const n = new Comment(nid);
     _seedDetachedTreeState(n);
-    _cache.set(nid, n);
-    return n;
+    _cachePut(nid, n)
+    return _stampOwnerDoc(n, this);
   }
   createCDATASection(data) {
     // Spec: throw NotSupportedError on an HTML document, reject data
@@ -5012,8 +5555,8 @@ class Document extends Node {
     const nid = +_dom("create_text_node", str);
     const n = new CDATASection(nid);
     _seedDetachedTreeState(n);
-    _cache.set(nid, n);
-    return n;
+    _cachePut(nid, n)
+    return _stampOwnerDoc(n, this);
   }
   createProcessingInstruction(target, data) {
     // Spec: not gated on document type. Reject targets that are not an XML
@@ -5029,15 +5572,15 @@ class Document extends Node {
     const nid = +_dom("create_text_node", str);
     const n = new ProcessingInstruction(nid, tgt);
     _seedDetachedTreeState(n);
-    _cache.set(nid, n);
-    return n;
+    _cachePut(nid, n)
+    return _stampOwnerDoc(n, this);
   }
   createDocumentFragment() {
     const nid = +_dom("create_document_fragment");
     const frag = new DocumentFragment(nid);
     _seedDetachedTreeState(frag);
-    _cache.set(nid, frag);
-    return frag;
+    _cachePut(nid, frag)
+    return _stampOwnerDoc(frag, this);
   }
   // Legacy DOM Level 2 event factory. Spec returns an event of the requested
   // class with an empty type until init*Event() is called. We previously
@@ -5077,21 +5620,44 @@ class Document extends Node {
   }
   createRange() { return new Range(); }
   addEventListener(type, fn, opts) {
-    if (typeof fn !== 'function') return;
-    if (!this._listeners) this._listeners = {};
-    if (!this._listeners[type]) this._listeners[type] = [];
-    if (!this._listeners[type].includes(fn)) this._listeners[type].push(fn);
+    // 与 Node/Element 共享 listener 表(spec:EventTarget 统一;document 的
+    // capture listener 必须参与事件路径的捕获/冒泡)。
+    _eventTargetAdd(this, type, fn, opts);
   }
-  removeEventListener(type, fn) {
-    if (this._listeners?.[type]) {
-      this._listeners[type] = this._listeners[type].filter(h => h !== fn);
-    }
+  removeEventListener(type, fn, opts) {
+    _eventTargetRemove(this, type, fn, opts);
   }
   dispatchEvent(event) {
     if (!event) return true;
-    const handlers = (this._listeners?.[event.type] || []).slice();
-    for (const h of handlers) { try { h.call(this, event); } catch(e) { console.error('document event error:', e); } }
+    event.target = event.target || this;
+    const byType = _eventTargetListeners.get(this);
+    const entries = (byType && byType.get(String(event.type)) ? byType.get(String(event.type)) : []).slice();
+    event.currentTarget = this;
+    event.eventPhase = 2;
+    for (const entry of entries) {
+      if (entry.removed) continue;
+      try {
+        if (typeof entry.callback === "function") entry.callback.call(this, event);
+        else entry.callback.handleEvent.call(entry.callback, event);
+      } catch(e) { console.error('document event error:', e); }
+      if (event._immediatePropagationStopped) break;
+    }
+    event.currentTarget = null;
+    event.eventPhase = 0;
     return !event.defaultPrevented;
+  }
+  cloneNode(deep) {
+    // spec:克隆 Document 仍得 Document(WPT 用克隆文档跑完整事件链,
+    // 需要它的 wrapper 与 parentNode 链上的 #document 同一身份)。
+    const nid = +_dom("clone_node", this._nid, deep ? "true" : "false");
+    const doc = new Document(nid);
+    doc._detachedDoc = true;
+    doc._contentType = this._contentType;
+    if (this._docUrl !== undefined) doc._docUrl = this._docUrl;
+    if (this._docType) doc._docType = this._docType;
+    _cachePut(nid, doc);
+    _stampOwnerDoc(doc, doc);
+    return doc;
   }
   createTreeWalker(root, whatToShow, filter) {
     // whatToShow is unsigned long; default SHOW_ALL only when the arg is omitted.
@@ -5307,30 +5873,44 @@ class Document extends Node {
       // jQuery 3.x with it. Reuse the DOMParser path to build a detached
       // document, then optionally set the title.
       createHTMLDocument(title) {
-        // Build head>title and body explicitly. Parsing a full skeleton string
-        // as innerHTML of <html> collapses through the fragment parser (it
-        // dropped head/body and kept only <title>), leaving doc.body null.
-        const doc = new DOMParser().parseFromString("", "text/html");
-        const root = doc.documentElement;
-        const head = document.createElement("head");
-        const titleEl = document.createElement("title");
+        // 规范:返回新的、独立的、带 doctype + html>head(+title)+body 的真实
+        // Document(WPT 依赖 doc.childNodes[0] 是 doctype)。之前走 DOMParser
+        // 的假对象 —— 节点没有真实 _nid 树,ownerDocument 同一性全部失败。
+        const doc = new Document(+_dom("create_document"));
+        doc._detachedDoc = true;
+        doc._docUrl = "about:blank";
+        doc._contentType = "text/html";
+        const html = doc.createElement("html");
+        const head = doc.createElement("head");
+        const titleEl = doc.createElement("title");
         if (title != null) titleEl.textContent = String(title);
         head.appendChild(titleEl);
-        const body = document.createElement("body");
-        root.appendChild(head);
-        root.appendChild(body);
+        const body = doc.createElement("body");
+        html.appendChild(head);
+        html.appendChild(body);
+        doc.appendChild(html);
+        // doctype 必须是第一个子节点;先挂 html 再把 doctype 前插
+        // (insertBefore 到 element 之前是合法序,规范 builder 形状一致)。
+        const dt = doc.implementation.createDocumentType("html", "", "");
+        doc.insertBefore(dt, html);
+        doc._cacheGeneration = _cacheGen(doc._nid);
+        _cachePut(doc._nid, doc)
         return doc;
       },
-      // Real spec: createDocument(namespaceURI, qualifiedName, doctype) →
-      // an XML document with a root element of the given name. We don't
-      // have a separate XML stack, so return a minimal detached document
-      // with an element of the requested local name as documentElement.
-      createDocument(_ns, qualifiedName, _doctype) {
-        const name = (qualifiedName && String(qualifiedName)) || "root";
-        const safe = name.replace(/[^a-zA-Z0-9-]/g, "");
-        const html = qualifiedName ? `<${safe}></${safe}>` : "";
-        const doc = new DOMParser().parseFromString(html, "application/xml");
-        if (_doctype) doc._docType = _doctype;
+      // 规范:createDocument(ns, qualifiedName, doctype) → 独立 XML 文档,
+      // qualifiedName 非空时以该名为根元素(名字校验交给 createElementNS,
+      // 非法名抛 InvalidCharacterError/NamespaceError,与 WPT 断言一致)。
+      createDocument(ns, qualifiedName, doctype) {
+        const doc = new Document(+_dom("create_document"));
+        doc._detachedDoc = true;
+        doc._docUrl = "about:blank";
+        doc._contentType = (String(ns) === "http://www.w3.org/1999/xhtml")
+          ? "application/xhtml+xml" : "application/xml";
+        if (qualifiedName != null) {
+          const root = doc.createElementNS(ns == null ? null : String(ns), String(qualifiedName));
+          doc.appendChild(root);
+        }
+        if (doctype) doc._docType = doctype;
         return doc;
       },
       // createDocumentType(qualifiedName, publicId, systemId): build a detached
@@ -5342,8 +5922,11 @@ class Document extends Node {
         if (name === "" || /[\t\n\f\r >]/.test(name)) {
           throw new DOMException("The qualified name '" + name + "' contains an invalid character", "InvalidCharacterError");
         }
+        // 用真正的 NodeData::Doctype 节点(之前用 comment 节点顶着,
+        // node_type 返回 8,_wrap 会给出 Comment 包装,树走查时 doctype
+        // 会被当作普通节点忽略)。
         const dt = new DocumentType(
-          +_dom("create_comment_node", ""),
+          +_dom("create_doctype", name, (publicId === undefined ? "" : String(publicId)) + "\0" + (systemId === undefined ? "" : String(systemId))),
           name,
           publicId === undefined ? "" : String(publicId),
           systemId === undefined ? "" : String(systemId)
@@ -5453,10 +6036,13 @@ class DocumentFragment extends Node {
       _dom("set_inner_html", this._nid, html);
     }
   }
-  querySelector(s) { return _wrapEl(+_dom("query_selector_scoped", this._nid, s)); }
+  querySelector(s) {
+    if (arguments.length < 1) throw new TypeError("Failed to execute 'querySelector': 1 argument required, but only 0 present.");
+    return _wrapEl(_qsSingleScoped(this._nid, _qsCheckSelector(String(s))));
+  }
   querySelectorAll(s) {
-    const ids = _domParse("query_selector_all_scoped", this._nid, s) || [];
-    return _nodeList(ids.map(_wrapEl).filter(Boolean));
+    if (arguments.length < 1) throw new TypeError("Failed to execute 'querySelectorAll': 1 argument required, but only 0 present.");
+    return _nodeList(_qsScopedAll(this._nid, _qsCheckSelector(String(s))).map(_wrapEl).filter(Boolean));
   }
   get children() {
     const ids = _domParse("element_children", this._nid) || [];
@@ -5477,10 +6063,21 @@ class DocumentFragment extends Node {
     return null;
   }
   cloneNode(deep) {
-    const nid = +_dom("clone_node", this._nid, deep ? "true" : "false");
-    const frag = new DocumentFragment(nid);
-    _cache.set(nid, frag);
-    return frag;
+    // fragment 在 Rust 侧用 NodeData::Document 表示,泛型 clone 后 wrapper
+    // 会被 nodeType 判成 9 —— 走 JS 结构克隆保住 DocumentFragment 身份。
+    const copy = _shallowCloneNode(this);
+    if (deep && copy) {
+      const stack = [[this, copy]];
+      while (stack.length) {
+        const [src, dst] = stack.pop();
+        const kids = src.childNodes;
+        for (let i = 0; i < kids.length; i++) {
+          const c = _shallowCloneNode(kids[i]);
+          if (c) { dst.appendChild(c); stack.push([kids[i], c]); }
+        }
+      }
+    }
+    return copy;
   }
 }
 
@@ -5499,6 +6096,10 @@ class DocumentType extends Node {
   get nodeValue() { return null; }
   set nodeValue(v) {}
   get ownerDocument() { return this._ownerDocument || globalThis.document; }
+  // ChildNode mixin(DocumentType 是其成员之一)
+  remove() {
+    if (this.parentNode) this.parentNode.removeChild(this);
+  }
 }
 
 const _cache = new Map();
@@ -5649,17 +6250,61 @@ class HTMLImageElement extends Element {
   get complete() {
     this._refreshImageFromCache();
     this._queueImageRequest();
+    if (this.src && !this._imageSizeProbed && !this._imageComplete) {
+      this._probeImageSize();
+    }
     return this._imageComplete;
   }
   get naturalWidth() {
     this._refreshImageFromCache();
     this._queueImageRequest();
-    return this._imageNaturalWidth;
+    if (this._imageNaturalWidth === undefined || this._imageNaturalWidth === 0) {
+      this._probeImageSize();
+    }
+    return this._imageNaturalWidth || 0;
   }
   get naturalHeight() {
     this._refreshImageFromCache();
     this._queueImageRequest();
-    return this._imageNaturalHeight;
+    if (this._imageNaturalHeight === undefined || this._imageNaturalHeight === 0) {
+      this._probeImageSize();
+    }
+    return this._imageNaturalHeight || 0;
+  }
+  // 无渲染管线的构建(render feature 关)时,op_image_metadata 缺失 ——
+  // 用轻量头解析 op + SVG 文本解析兜底,保证 naturalWidth/complete 可观测。
+  _probeImageSize() {
+    if (this._imageSizeProbed || !this.src) return;
+    this._imageSizeProbed = true;
+    const self = this;
+    const apply = function(w, h) {
+      self._imageNaturalWidth = w;
+      self._imageNaturalHeight = h;
+      self._imageComplete = true;
+      self._imageCurrentSrc = self.src;
+      try { self.dispatchEvent(new Event('load')); } catch (e) {}
+    };
+    try {
+      const op = Deno.core.ops.op_image_size_for_element;
+      if (typeof op === 'function') {
+        const raw = JSON.parse(op(this._nid));
+        if (raw.ok) { apply(raw.width, raw.height); return; }
+      }
+      // SVG:拉文本解析 width/height/viewBox
+      if (/\.svg($|\?)/i.test(this.src) || /image\/svg/i.test(this.getAttribute('type') || '')) {
+        fetch(this.src).then(function(r) { return r.text(); }).then(function(text) {
+          const wM = text.match(/<svg[^>]*\bwidth\s*=\s*["']?([\d.]+)/i);
+          const hM = text.match(/<svg[^>]*\bheight\s*=\s*["']?([\d.]+)/i);
+          const vbM = text.match(/viewBox\s*=\s*["']?[^"']*?\s([\d.]+)\s+([\d.]+)\s*["']/i);
+          if (wM && hM) apply(parseFloat(wM[1]), parseFloat(hM[1]));
+          else if (vbM) apply(parseFloat(vbM[1]), parseFloat(vbM[2]));
+          else apply(300, 150); // SVG 默认内在尺寸(spec)
+        }).catch(function() { self._imageComplete = true; try { self.dispatchEvent(new Event('error')); } catch (e) {} });
+        return;
+      }
+      this._imageComplete = true;
+      try { this.dispatchEvent(new Event('error')); } catch (e) {}
+    } catch (e) { this._imageComplete = true; }
   }
   get onload() { return this._imageOnload || null; }
   set onload(value) {
@@ -5940,15 +6585,83 @@ class HTMLMediaElement extends Element {
   static HAVE_CURRENT_DATA = 2;
   static HAVE_FUTURE_DATA = 3;
   static HAVE_ENOUGH_DATA = 4;
-  canPlayType(_type) { return ''; }
-  load() {}
-  play() {
-    return Promise.reject(new DOMException(
-      "The element has no supported sources.",
-      "NotSupportedError",
-    ));
+  // 媒体容器支持表(真实探测:能解析出元数据的格式才宣称可播)。
+  // probably:我们可完整解析;maybe:容器认识但解码不保证;空串:不支持。
+  canPlayType(type) {
+    const t = String(type || '').toLowerCase();
+    // 视频容器
+    if (t.includes('mp4') || t.includes('m4v')) return 'probably';
+    if (t.includes('webm')) return 'probably';
+    if (t.includes('x-msvideo') || t.includes('/avi')) return 'maybe';
+    if (t.includes('quicktime')) return 'maybe';
+    if (t.includes('matroska')) return 'maybe';
+    // 音频容器
+    if (t.includes('mpeg') || t.includes('mp3')) return 'probably';
+    if (t.includes('wav') || t.includes('wave')) return 'probably';
+    if (t.includes('flac')) return 'probably';
+    if (t.includes('ogg')) return 'maybe';
+    if (t.includes('aac')) return 'maybe';
+    if (t.includes('flac')) return 'probably';
+    // 编解码参数型(video/mp4; codecs="avc1.42E01E, mp4a.40.2")
+    if (t.includes('avc1') || t.includes('h264') || t.includes('mp4a')) return 'probably';
+    if (t.includes('opus') || t.includes('vorbis')) return 'maybe';
+    return '';
   }
-  pause() {}
+  load() {
+    // 同步触发元数据探测(异步回调由 Rust 侧返回后统一派发)
+    this._mediaLoadStarted = true;
+    this._mediaProbe();
+  }
+  _mediaProbe() {
+    const op = Deno.core.ops.op_media_metadata;
+    if (typeof op !== 'function' || !this.src) return;
+    try {
+      const raw = op(this._nid);
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.ok) {
+        this._mediaDuration = Number(parsed.duration) || 0;
+        this._mediaVideoWidth = Number(parsed.videoWidth) || 0;
+        this._mediaVideoHeight = Number(parsed.videoHeight) || 0;
+        this._mediaKind = parsed.kind || '';
+        this._mediaReadyState = 1; // HAVE_METADATA
+        this._mediaCurrentSrc = this.src;
+        // 事件派发(spec:loadedmetadata → loadeddata)
+        try { this.dispatchEvent(new Event('loadedmetadata')); } catch (e) {}
+        try { this.dispatchEvent(new Event('loadeddata')); } catch (e) {}
+        try { this.dispatchEvent(new Event('canplay')); } catch (e) {}
+      } else {
+        this._mediaReadyState = 0;
+        try { this.dispatchEvent(new Event('error')); } catch (e) {}
+      }
+    } catch (e) {}
+    if (this._mediaOnloadedmetadata && typeof this._mediaOnloadedmetadata === 'function') {
+      try { this._mediaOnloadedmetadata(); } catch (e) {}
+    }
+  }
+  play() {
+    // 无真实解码输出设备:状态机完整(play→playing),token Promise 正常 resolve
+    this._mediaPaused = false;
+    const self = this;
+    if (this._mediaDuration > 0) {
+      try { this.dispatchEvent(new Event('play')); } catch (e) {}
+      try { this.dispatchEvent(new Event('playing')); } catch (e) {}
+    }
+    return Promise.resolve().then(function() {
+      if (self._mediaDuration === 0 && self.src) {
+        return Promise.reject(new DOMException(
+          'The element has no supported sources.',
+          'NotSupportedError',
+        ));
+      }
+      try { self.dispatchEvent(new Event('timeupdate')); } catch (e) {}
+      try { self.dispatchEvent(new Event('ended')); } catch (e) {}
+      self._mediaPaused = true;
+    });
+  }
+  pause() {
+    this._mediaPaused = true;
+    try { this.dispatchEvent(new Event('pause')); } catch (e) {}
+  }
   get NETWORK_EMPTY() { return HTMLMediaElement.NETWORK_EMPTY; }
   get NETWORK_IDLE() { return HTMLMediaElement.NETWORK_IDLE; }
   get NETWORK_LOADING() { return HTMLMediaElement.NETWORK_LOADING; }
@@ -5958,15 +6671,21 @@ class HTMLMediaElement extends Element {
   get HAVE_CURRENT_DATA() { return HTMLMediaElement.HAVE_CURRENT_DATA; }
   get HAVE_FUTURE_DATA() { return HTMLMediaElement.HAVE_FUTURE_DATA; }
   get HAVE_ENOUGH_DATA() { return HTMLMediaElement.HAVE_ENOUGH_DATA; }
-  get paused() { return true; }
-  get ended() { return false; }
-  get networkState() { return HTMLMediaElement.NETWORK_EMPTY; }
-  get readyState() { return HTMLMediaElement.HAVE_NOTHING; }
-  get error() { return null; }
+  get paused() { return this._mediaPaused !== false; }
+  get ended() { return this._mediaEnded === true; }
+  get networkState() { return this.src ? HTMLMediaElement.NETWORK_IDLE : HTMLMediaElement.NETWORK_EMPTY; }
+  get readyState() { return this._mediaReadyState || 0; }
+  get error() { return this._mediaError || null; }
   get seeking() { return false; }
   get currentTime() { return 0; }
-  set currentTime(v) {}
-  get duration() { return NaN; }
+  set currentTime(v) { try { this.dispatchEvent(new Event('seeking')); } catch (e) {} try { this.dispatchEvent(new Event('seeked')); } catch (e) {} }
+  get duration() {
+    if (this._mediaDuration === undefined && !this._mediaProbed) {
+      this._mediaProbed = true;
+      this._mediaProbe();
+    }
+    return this._mediaDuration !== undefined ? this._mediaDuration : NaN;
+  }
   get volume() { return 1; }
   set volume(v) {}
   get muted() { return false; }
@@ -5978,7 +6697,21 @@ class HTMLMediaElement extends Element {
     catch (_error) { return raw; }
   }
   set src(v) { this.setAttribute('src', v); }
-  get currentSrc() { return ""; }
+  get currentSrc() {
+    if (!this._mediaCurrentSrc && !this._mediaProbed && this.src) {
+      this._mediaProbed = true;
+      this._mediaProbe();
+    }
+    return this._mediaCurrentSrc || '';
+  }
+  get onloadedmetadata() { return this._mediaOnloadedmetadata || null; }
+  set onloadedmetadata(v) {
+    this._mediaOnloadedmetadata = typeof v === 'function' ? v : null;
+    if (this._mediaOnloadedmetadata && !this._mediaProbed && this.src) {
+      this._mediaProbed = true;
+      this._mediaProbe();
+    }
+  }
   get textTracks() {
     return TextTrackList.from(
       Array.from(this.querySelectorAll("track")).map((element) => element.track)
@@ -6000,8 +6733,18 @@ class HTMLVideoElement extends HTMLMediaElement {
     catch (_error) { return raw; }
   }
   set poster(value) { this.setAttribute("poster", value); }
-  get videoWidth() { return 0; }
-  get videoHeight() { return 0; }
+  get videoWidth() {
+    if (this._mediaVideoWidth === undefined && !this._mediaProbed && this.src) {
+      this._mediaProbed = true; this._mediaProbe();
+    }
+    return this._mediaVideoWidth || 0;
+  }
+  get videoHeight() {
+    if (this._mediaVideoHeight === undefined && !this._mediaProbed && this.src) {
+      this._mediaProbed = true; this._mediaProbe();
+    }
+    return this._mediaVideoHeight || 0;
+  }
 }
 class HTMLAudioElement extends HTMLMediaElement {}
 class HTMLTrackElement extends Element {
@@ -6037,6 +6780,52 @@ globalThis.TextTrackCue = TextTrackCue;
 globalThis.TextTrackCueList = TextTrackCueList;
 globalThis.VTTCue = VTTCue;
 
+// Blink HTML 接口表(供解析路径与 createElementNS 路径共用;必须顶层立即
+// 初始化 —— 曾放在 createElementNS 分支里导致解析出的 img/video 等被包装成
+// HTMLUnknownElement,naturalWidth/duration 等接口全部缺失)。
+globalThis.__obscuraHtmlInterfaceMap = {
+  a: "HTMLAnchorElement", abbr: null, area: "HTMLAreaElement",
+  audio: "HTMLAudioElement", base: "HTMLBaseElement",
+  body: "HTMLBodyElement", br: "HTMLBRElement",
+  button: "HTMLButtonElement", canvas: "HTMLCanvasElement",
+  data: "HTMLDataElement", datalist: "HTMLDataListElement",
+  details: "HTMLDetailsElement", dialog: "HTMLDialogElement",
+  directory: "HTMLDirectoryElement", div: "HTMLDivElement",
+  dl: "HTMLDListElement", dir: "HTMLDirectoryElement",
+  embed: "HTMLEmbedElement",
+  fieldset: "HTMLFieldSetElement", font: "HTMLFontElement",
+  form: "HTMLFormElement", frame: "HTMLFrameElement",
+  frameset: "HTMLFrameSetElement", head: "HTMLHeadElement",
+  h1: "HTMLHeadingElement", h2: "HTMLHeadingElement",
+  h3: "HTMLHeadingElement", h4: "HTMLHeadingElement",
+  h5: "HTMLHeadingElement", h6: "HTMLHeadingElement",
+  hr: "HTMLHRElement", html: "HTMLHtmlElement",
+  iframe: "HTMLIFrameElement", img: "HTMLImageElement",
+  input: "HTMLInputElement", label: "HTMLLabelElement",
+  legend: "HTMLLegendElement", li: "HTMLLIElement",
+  link: "HTMLLinkElement", map: "HTMLMapElement",
+  meta: "HTMLMetaElement", meter: "HTMLMeterElement",
+  del: "HTMLModElement", ins: "HTMLModElement",
+  object: "HTMLObjectElement", ol: "HTMLOListElement",
+  optgroup: "HTMLOptGroupElement", option: "HTMLOptionElement",
+  output: "HTMLOutputElement", p: "HTMLParagraphElement",
+  param: "HTMLParamElement", pre: "HTMLPreElement",
+  progress: "HTMLProgressElement", blockquote: "HTMLQuoteElement",
+  q: "HTMLQuoteElement", script: "HTMLScriptElement",
+  select: "HTMLSelectElement", source: "HTMLSourceElement",
+  span: "HTMLSpanElement", style: "HTMLStyleElement",
+  caption: "HTMLTableCaptionElement",
+  col: "HTMLTableColElement", colgroup: "HTMLTableColElement",
+  table: "HTMLTableElement", tbody: "HTMLTableSectionElement",
+  td: "HTMLTableCellElement", tfoot: "HTMLTableSectionElement",
+  th: "HTMLTableCellElement", thead: "HTMLTableSectionElement",
+  tr: "HTMLTableRowElement", textarea: "HTMLTextAreaElement",
+  time: "HTMLTimeElement", title: "HTMLTitleElement",
+  track: "HTMLTrackElement", ul: "HTMLUListElement",
+  video: "HTMLVideoElement", wbr: null,
+  picture: "HTMLPictureElement",
+};
+
 function _elementClassFor(nid) {
   const tag = _domParse("tag_name", nid);
   // HTML tagName values are ASCII-uppercase. Foreign SVG names retain their
@@ -6048,13 +6837,24 @@ function _elementClassFor(nid) {
     if (tag === "svg" && globalThis.SVGSVGElement) return globalThis.SVGSVGElement;
     if (globalThis.SVGElement) return globalThis.SVGElement;
   }
-  if (tag === "FORM" && globalThis.HTMLFormElement) return globalThis.HTMLFormElement;
-  if (tag === "TEXTAREA" && globalThis.HTMLTextAreaElement) return globalThis.HTMLTextAreaElement;
-  if (tag === "IMG") return HTMLImageElement;
-  if (tag === "CANVAS" && globalThis.HTMLCanvasElement) return globalThis.HTMLCanvasElement;
-  if (tag === "AUDIO") return HTMLAudioElement;
-  if (tag === "VIDEO") return HTMLVideoElement;
-  if (tag === "TRACK") return HTMLTrackElement;
+  const ns = _domParse("namespace_uri", nid) || "http://www.w3.org/1999/xhtml";
+  const tagLower = tag ? tag.replace(/[\x41-\x5a]/g, function(c) { return c.toLowerCase(); }) : tag;
+  if (ns === "http://www.w3.org/1999/xhtml" && tagLower) {
+    // 注意:nid 路径的 tag 是 ASCII 大写渲染值,无法还原 createElementNS 时的
+    // 原始大小写(该 wrapper 创建时已缓存,不重建)。live wrap 按小写语义查表
+    // (与 HTML 解析器一致)。
+    const table = globalThis.__obscuraHtmlInterfaceMap;
+    if (table && Object.prototype.hasOwnProperty.call(table, tagLower)) {
+      const iface = table[tagLower];
+      if (iface && globalThis[iface]) return globalThis[iface];
+      return globalThis.HTMLElement;
+    }
+    // 表外未知名 → HTMLUnknownElement(Servo create.rs:466)
+    return globalThis.HTMLUnknownElement || globalThis.HTMLElement;
+  }
+  // HTML 命名空间 → HTMLElement;SVG/其它命名空间 → Element(WPT 断言
+  // XML 元素不是 HTMLElement)
+  if (ns === "http://www.w3.org/1999/xhtml") return globalThis.HTMLElement;
   return Element;
 }
 function _elementClassForKnownName(namespace, qualifiedName) {
@@ -6067,36 +6867,125 @@ function _elementClassForKnownName(namespace, qualifiedName) {
     if (globalThis.SVGElement) return globalThis.SVGElement;
   }
   if (namespace === "http://www.w3.org/1999/xhtml") {
-    const tag = localName.toUpperCase();
-    if (tag === "FORM" && globalThis.HTMLFormElement) return globalThis.HTMLFormElement;
-    if (tag === "TEXTAREA" && globalThis.HTMLTextAreaElement) return globalThis.HTMLTextAreaElement;
-    if (tag === "IMG") return HTMLImageElement;
-    if (tag === "CANVAS" && globalThis.HTMLCanvasElement) return globalThis.HTMLCanvasElement;
-    if (tag === "AUDIO") return HTMLAudioElement;
-    if (tag === "VIDEO") return HTMLVideoElement;
-    if (tag === "TRACK") return HTMLTrackElement;
+    // 接口映射大小写敏感:localName "SPAN"(含大写)→ HTMLUnknownElement
+    // (Blink 语义,WPT Upper-case 断言依赖),小写映射到具体 HTML 接口。
+    const tag = localName;
+    if (tag !== tag.toLowerCase()) {
+      return globalThis.HTMLUnknownElement || globalThis.HTMLElement;
+    }
+    // WPT Node-cloneNode 全表(Blink HTML 接口表,映射到 window[X])
+    const table = globalThis.__obscuraHtmlInterfaceMap;
+    void table;
+    if (Object.prototype.hasOwnProperty.call(table, tag)) {
+      const iface = table[tag];
+      if (iface && globalThis[iface]) return globalThis[iface];
+      return globalThis.HTMLElement;
+    }
+    // Servo create.rs:466 — 表外未知名一律 HTMLUnknownElement(HTMLElement 子类)
+    return globalThis.HTMLUnknownElement || globalThis.HTMLElement;
   }
-  return Element;
+  // 非 HTML 命名空间(SVG 已处理,其余 XML/test ns)→ 纯 Element。
+  // globalThis 引用:frame realm 与主 realm 共享构造器(share_global_
+  // constructors),instanceof 跨 realm 判断才成立。
+  return globalThis.Element;
+}
+function _cachePut(nid, wrapper) {
+  // 所有 cache 写入统一走这里:wrapper 必须带当前 slot generation,否则
+  // 后续 _wrap 的 generation 校验会把 wrapper 误判过期并重建(nodeType/
+  // 身份分裂:fragment 会被重建成 Rust 侧的 Document data)。
+  wrapper._cacheGeneration = _cacheGen(nid);
+  _cache.set(nid, wrapper);
+  return wrapper;
+}
+// Servo(document.rs:439 current_script: MutNullableDom<HTMLScriptElement> +
+// htmlscriptelement.rs:1019-1034)语义的整体落地:
+//  - document 持有的是**HTMLScriptElement 强引用**,类型即 script,读者拿到的
+//    要么是 script 要么 null —— 不存在"nid 复用后指到别的元素"的通道。
+//  - classic:set(old) → set(self) → run → set(old)(栈式);module:set(None)。
+//  obscura 用 nid 数字中转,slot 复用会让数字指向陌生节点。这里用栈 + 实时
+//  node_type/tag 双查 + 临时 wrapper(绕开 wrapper cache)兜底,保证从
+//  document.currentScript 流出的永远是当前正在执行的 script(或 null)。
+const _currentScriptStack = [];
+function _pushCurrentScript(nid) {
+  _currentScriptStack.push(nid);
+  globalThis.__currentScriptNid = nid;
+  globalThis.__currentScriptSync = true;
+}
+function _popCurrentScript(prevNid, prevSync) {
+  _currentScriptStack.pop();
+  globalThis.__currentScriptNid = prevNid;
+  globalThis.__currentScriptSync = prevSync === true;
+  if (_currentScriptStack.length === 0 && !prevNid) globalThis.__currentScriptSync = prevSync === true;
+}
+globalThis._pushCurrentScript = _pushCurrentScript;
+globalThis._popCurrentScript = _popCurrentScript;
+globalThis._currentScriptLive = _currentScriptLive;
+function _currentScriptLive() {
+  if (globalThis.__currentScriptSync !== true) return null;
+  const nid = globalThis.__currentScriptNid;
+  if (!nid) return null;
+  // 双重实时校验(不经过 wrapper cache):nodeType 必须是元素、tag 必须是
+  // SCRIPT。任一不符 → null(对应 Servo 的 MutNullableDom 类型安全)。
+  let nt = null, tag = null;
+  try { nt = +_dom("node_type", nid); } catch (e) {}
+  if (nt !== 1) return null;
+  try { tag = _domParse("tag_name", nid); } catch (e) {}
+  if (tag !== "SCRIPT") return null;
+  // 临时 wrapper:Next 只读 getAttribute('src')/instanceof,身份无关紧要;
+  // 绝不从 _cache 取 —— cache 里可能残留同 nid 的历史 wrapper(select 事故)。
+  const w = new HTMLScriptElement(nid);
+  w._cacheGeneration = _cacheGen(nid);
+  return w;
+}
+function _cacheGen(nid) {
+  // nid 复用检测:slot 重生后 generation 变化,缓存里的旧 wrapper 失效
+  // (Next.js 水合曾收到跨 slot 僵尸 wrapper —— select 冒充 script)。
+  try { return +_dom("node_generation", nid) || 0; } catch(e) { return 0; }
 }
 function _wrap(nid) {
   if (nid < 0 || nid === null || nid === undefined || isNaN(nid)) return null;
-  if (_cache.has(nid)) return _cache.get(nid);
+  if (_cache.has(nid)) {
+    const cached = _cache.get(nid);
+    if (cached && cached._cacheGeneration === _cacheGen(nid)) return cached;
+    _cache.delete(nid);
+  }
   const t = +_dom("node_type", nid);
   let n;
-  if (t === 1) { const C = _elementClassFor(nid); n = new C(nid); }
-  else if (t === 3) n = new Text(nid);
-  else if (t === 8) n = new Comment(nid);
-  else if (t === 9) n = new Document(nid);
+  if (t === 1) { const C = _elementClassFor(nid); n = new C(nid);
+    // createElementNS("ns","foo:div") 的 wrapper 重建时恢复 prefix
+    // (cloneNode/live collection 都走此路径;node_name 是 qualified 名)。
+    const nn = _domParse("node_name", nid);
+    if (nn && nn.indexOf(":") > 0) n._prefix = nn.slice(0, nn.indexOf(":"));
+  }
+  else if (t === 3) n = new (globalThis.Text)(nid);
+  else if (t === 8) n = new (globalThis.Comment)(nid);
+  else if (t === 9) n = new (globalThis.Document)(nid);
+  else if (t === 10) {
+    // 真 DocumentType 包装:裸 Node 没有 remove()/name 等接口,
+    // WPT 的 doc.childNodes[0].remove() 会直接 TypeError。
+    const nm = _domParse("doctype_name", nid) || "";
+    const pid = _domParse("doctype_public_id", nid) || "";
+    const sid = _domParse("doctype_system_id", nid) || "";
+    n = new DocumentType(nid, nm, pid, sid);
+  }
   else n = new Node(nid);
-  _cache.set(nid, n);
+  n._cacheGeneration = _cacheGen(nid);
+  _cachePut(nid, n)
   return n;
 }
 function _wrapEl(nid) {
   if (nid < 0 || nid === null || nid === undefined || isNaN(nid)) return null;
-  if (_cache.has(nid)) return _cache.get(nid);
+  if (_cache.has(nid)) {
+    const cached = _cache.get(nid);
+    if (cached && cached._cacheGeneration === _cacheGen(nid)) return cached;
+    _cache.delete(nid);
+  }
   const C = _elementClassFor(nid);
   const n = new C(nid);
-  _cache.set(nid, n);
+  const nn = _domParse("node_name", nid);
+  if (nn && nn.indexOf(":") > 0) n._prefix = nn.slice(0, nn.indexOf(":"));
+  n._cacheGeneration = _cacheGen(nid);
+  _cachePut(nid, n)
   return n;
 }
 
@@ -6106,7 +6995,11 @@ globalThis.self = globalThis;
 globalThis.document = null;
 function _resolveUrl(url) {
   url = String(url);
-  if (!url) return url;
+  if (!url) {
+    // DOM Standard:parse "" relative to base → base URL(等效 reload 当前页)。
+    // 直接返回空串会让 Rust 端 Url::parse 失败落到 about:blank。
+    return _domParse("document_url") || url;
+  }
   if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:')) return url;
   try { return new URL(url, _domParse("document_url") || "about:blank").href; } catch(e) { return url; }
 }
@@ -6551,8 +7444,394 @@ globalThis.Notification = class Notification {
   constructor() {}
 };
 
+// ─── WebGL stub ──────────────────────────────────────────────────────────────
+//
+// A real WebGL backend (wgpu) is not wired up yet, but fingerprinting
+// libraries and anti-bot challenges (Cloudflare Turnstile, fingerprintjs)
+// require a WebGL context to complete. This stub returns a plausible
+// context whose getParameter / getExtension / getSupportedExtensions
+// answers match the fingerprint injected by
+// `Page.addScriptToEvaluateOnNewDocument`. Draw calls are no-ops; shader
+// / buffer / texture creation returns plausible non-null handles so
+// feature-detection scripts take the WebGL path instead of bailing.
+//
+// The vendor/renderer are read from globalThis.__obscura_webgl_vendor /
+// __obscura_webgl_renderer (set by the fingerprint injection script).
+// Defaults match a generic Intel/Linux profile.
+function _webglParamDefault(p) {
+  // p is a GL enum (number). Cover the parameters fingerprintjs and
+  // similar libs probe; everything else returns null (matches a real
+  // context for unknown enums).
+  var VENDOR = 0x1F00, RENDERER = 0x1F01, VERSION = 0x1F02, SHADING_LANGUAGE_VERSION = 0x8B8C;
+  var MAX_TEXTURE_SIZE = 0x0D33, MAX_VIEWPORT_DIMS = 0x0D3A, MAX_VERTEX_ATTRIBS = 0x8869;
+  var MAX_VARYING_VECTORS = 0x8DFC, MAX_VERTEX_UNIFORM_VECTORS = 0x8DFB;
+  var MAX_FRAGMENT_UNIFORM_VECTORS = 0x8DFD, MAX_RENDERBUFFER_SIZE = 0x84E8;
+  var MAX_COMBINED_TEXTURE_IMAGE_UNITS = 0x8B4D, MAX_TEXTURE_IMAGE_UNITS = 0x8872;
+  var MAX_VERTEX_TEXTURE_IMAGE_UNITS = 0x8B4C, MAX_CUBE_MAP_TEXTURE_SIZE = 0x851C;
+  var ALIASED_LINE_WIDTH_RANGE = 0x846E, ALIASED_POINT_SIZE_RANGE = 0x846D;
+  var RED_BITS = 0x0D52, GREEN_BITS = 0x0D53, BLUE_BITS = 0x0D54;
+  var ALPHA_BITS = 0x0D55, DEPTH_BITS = 0x0D56, STENCIL_BITS = 0x0D57;
+  var SUBPIXEL_BITS = 0x0D50, SAMPLES = 0x80A9, SAMPLE_BUFFERS = 0x80A8;
+  var UNMASKED_VENDOR_WEBGL = 0x9245, UNMASKED_RENDERER_WEBGL = 0x9246;
+  var VENDOR_STR = globalThis.__obscura_webgl_vendor || 'Intel Inc.';
+  var RENDERER_STR = globalThis.__obscura_webgl_renderer || 'Intel(R) HD Graphics 530';
+  var VERSION_STR = 'WebGL 1.0', GLSL_STR = 'WebGL GLSL ES 1.0';
+  switch (p) {
+    case VENDOR: return VENDOR_STR;
+    case RENDERER: return RENDERER_STR;
+    case UNMASKED_VENDOR_WEBGL: return VENDOR_STR;
+    case UNMASKED_RENDERER_WEBGL: return RENDERER_STR;
+    case VERSION: return VERSION_STR;
+    case SHADING_LANGUAGE_VERSION: return GLSL_STR;
+    case MAX_TEXTURE_SIZE: return 16384;
+    case MAX_VIEWPORT_DIMS: return new Int32Array([0, 0, 16384, 16384]);
+    case MAX_VERTEX_ATTRIBS: return 16;
+    case MAX_VARYING_VECTORS: return 30;
+    case MAX_VERTEX_UNIFORM_VECTORS: return 4096;
+    case MAX_FRAGMENT_UNIFORM_VECTORS: return 1024;
+    case MAX_RENDERBUFFER_SIZE: return 16384;
+    case MAX_COMBINED_TEXTURE_IMAGE_UNITS: return 32;
+    case MAX_TEXTURE_IMAGE_UNITS: return 16;
+    case MAX_VERTEX_TEXTURE_IMAGE_UNITS: return 16;
+    case MAX_CUBE_MAP_TEXTURE_SIZE: return 16384;
+    case ALIASED_LINE_WIDTH_RANGE: return new Float32Array([1, 1]);
+    case ALIASED_POINT_SIZE_RANGE: return new Float32Array([1, 1024]);
+    case RED_BITS: case GREEN_BITS: case BLUE_BITS: case ALPHA_BITS: return 8;
+    case DEPTH_BITS: return 24;
+    case STENCIL_BITS: return 0;
+    case SUBPIXEL_BITS: return 4;
+    case SAMPLES: return 4;
+    case SAMPLE_BUFFERS: return 1;
+    default: return null;
+  }
+}
+
+var _WEBGL_EXTENSIONS = [
+  'ANGLE_instanced_arrays',
+  'EXT_blend_minmax',
+  'EXT_color_buffer_half_float',
+  'EXT_disjoint_timer_query',
+  'EXT_float_blend',
+  'EXT_frag_depth',
+  'EXT_shader_texture_lod',
+  'EXT_texture_compression_bptc',
+  'EXT_texture_compression_rgtc',
+  'EXT_texture_filter_anisotropic',
+  'EXT_sRGB',
+  'OES_element_index_uint',
+  'OES_fbo_render_mipmap',
+  'OES_standard_derivatives',
+  'OES_texture_float',
+  'OES_texture_float_linear',
+  'OES_texture_half_float',
+  'OES_texture_half_float_linear',
+  'OES_vertex_array_object',
+  'WEBGL_color_buffer_float',
+  'WEBGL_compressed_texture_s3tc',
+  'WEBGL_compressed_texture_s3tc_srgb',
+  'WEBGL_debug_renderer_info',
+  'WEBGL_debug_shaders',
+  'WEBGL_depth_texture',
+  'WEBGL_draw_buffers',
+  'WEBGL_lose_context',
+  'WEBGL_multi_draw',
+];
+
+function _makeWebGLContext(type) {
+  var ctx = {
+    _isWebGLStub: true,
+    _type: type,
+    canvas: null, // set by caller
+    drawingBufferWidth: 300,
+    drawingBufferHeight: 150,
+    // GL constants we expose as properties (a real context has these on the
+    // prototype). Keep the list minimal but include the ones fingerprintjs
+    // enumerates.
+    VERSION: 0x1F02,
+    VENDOR: 0x1F00,
+    RENDERER: 0x1F01,
+    SHADING_LANGUAGE_VERSION: 0x8B8C,
+  };
+  // Generate plausible non-zero WebGL object handles. Each call returns a
+  // new handle so a script that creates multiple buffers/textures sees
+  // distinct IDs. Never return null/0 from a create* call — feature
+  // detection uses "if (buf = gl.createBuffer())" and a null here makes
+  // the script take the fallback path.
+  var _handle = 1;
+  function nextHandle() { return ++_handle; }
+  // Build the method table. We bind every common GL method so a script
+  // can call them without TypeError. Most are no-ops; the ones that
+  // return values return plausible defaults.
+  var methods = {
+    getParameter: _webglParamDefault,
+    getError: function() { return 0; /* NO_ERROR */ },
+    getString: function(p) {
+      // VENDOR / RENDERER / VERSION / SHADING_LANGUAGE_VERSION
+      return _webglParamDefault(p) || '';
+    },
+    getExtension: function(name) {
+      if (_WEBGL_EXTENSIONS.indexOf(name) < 0) return null;
+      if (name === 'WEBGL_debug_renderer_info') {
+        return {
+          UNMASKED_VENDOR_WEBGL: 0x9245,
+          UNMASKED_RENDERER_WEBGL: 0x9246,
+        };
+      }
+      if (name === 'EXT_texture_filter_anisotropic') {
+        return { MAX_TEXTURE_MAX_ANISOTROPY_EXT: 0x84FF, TEXTURE_MAX_ANISOTROPY_EXT: 0x84FE };
+      }
+      if (name === 'WEBGL_lose_context') {
+        return { loseContext: function(){}, restoreContext: function(){} };
+      }
+      if (name === 'OES_texture_float' || name === 'OES_texture_half_float' ||
+          name === 'OES_texture_float_linear' || name === 'OES_texture_half_float_linear') {
+        return { HALF_FLOAT_OES: 0x8D61 };
+      }
+      if (name === 'OES_standard_derivatives') {
+        return { FRAGMENT_SHADER_DERIVATIVE_HINT_OES: 0x8B8B };
+      }
+      if (name === 'OES_element_index_uint') return {};
+      if (name === 'OES_vertex_array_object') {
+        return {
+          VERTEX_ARRAY_BINDING_OES: 0x85B5,
+          createVertexArrayOES: function() { return { _id: nextHandle() }; },
+          deleteVertexArrayOES: function() {},
+          isVertexArrayOES: function() { return false; },
+          bindVertexArrayOES: function() {},
+        };
+      }
+      if (name === 'ANGLE_instanced_arrays') {
+        return {
+          VERTEX_ATTRIB_ARRAY_DIVISOR_ANGLE: 0x88FE,
+          drawArraysInstancedANGLE: function() {},
+          drawElementsInstancedANGLE: function() {},
+          vertexAttribDivisorANGLE: function() {},
+        };
+      }
+      if (name === 'WEBGL_draw_buffers') {
+        return { COLOR_ATTACHMENT0_WEBGL: 0x8CE0, DRAW_BUFFER0_WEBGL: 0x8825, MAX_DRAW_BUFFERS_WEBGL: 0x8824 };
+      }
+      if (name === 'WEBGL_depth_texture') {
+        return { UNSIGNED_INT_24_8_WEBGL: 0x84FA };
+      }
+      if (name === 'WEBGL_color_buffer_float') {
+        return { RGBA32F_EXT: 0x8814, RGB32F_EXT: 0x8815 };
+      }
+      if (name === 'WEBGL_compressed_texture_s3tc' || name === 'WEBGL_compressed_texture_s3tc_srgb') {
+        return { COMPRESSED_RGBA_S3TC_DXT1_EXT: 0x83F1, COMPRESSED_RGBA_S3TC_DXT3_EXT: 0x83F2, COMPRESSED_RGBA_S3TC_DXT5_EXT: 0x83F3 };
+      }
+      // Default: return empty extension object so the caller sees a truthy value.
+      return {};
+    },
+    getSupportedExtensions: function() {
+      return _WEBGL_EXTENSIONS.slice();
+    },
+    getContextAttributes: function() {
+      return {
+        alpha: true,
+        antialias: true,
+        depth: true,
+        failIfMajorPerformanceCaveat: false,
+        powerPreference: 'default',
+        premultipliedAlpha: true,
+        preserveDrawingBuffer: false,
+        stencil: false,
+        desynchronized: false,
+        colorSpace: 'srgb',
+        willReadFrequently: false,
+      };
+    },
+    activeTexture: function() {},
+    attachShader: function() {},
+    bindAttribLocation: function() {},
+    bindBuffer: function() {},
+    bindFramebuffer: function() {},
+    bindRenderbuffer: function() {},
+    bindTexture: function() {},
+    blendColor: function() {},
+    blendEquation: function() {},
+    blendEquationSeparate: function() {},
+    blendFunc: function() {},
+    blendFuncSeparate: function() {},
+    bufferData: function() {},
+    bufferSubData: function() {},
+    checkFramebufferStatus: function() { return 0x8CD5; /* FRAMEBUFFER_COMPLETE */ },
+    clear: function() {},
+    clearColor: function() {},
+    clearDepth: function() {},
+    clearStencil: function() {},
+    colorMask: function() {},
+    compileShader: function() {},
+    compressedTexImage2D: function() {},
+    compressedTexSubImage2D: function() {},
+    copyTexImage2D: function() {},
+    copyTexSubImage2D: function() {},
+    createBuffer: function() { return { _id: nextHandle() }; },
+    createFramebuffer: function() { return { _id: nextHandle() }; },
+    createProgram: function() { return { _id: nextHandle() }; },
+    createRenderbuffer: function() { return { _id: nextHandle() }; },
+    createShader: function() { return { _id: nextHandle() }; },
+    createTexture: function() { return { _id: nextHandle() }; },
+    cullFace: function() {},
+    deleteBuffer: function() {},
+    deleteFramebuffer: function() {},
+    deleteProgram: function() {},
+    deleteRenderbuffer: function() {},
+    deleteShader: function() {},
+    deleteTexture: function() {},
+    depthFunc: function() {},
+    depthMask: function() {},
+    depthRange: function() {},
+    detachShader: function() {},
+    disable: function() {},
+    disableVertexAttribArray: function() {},
+    drawArrays: function() {},
+    drawElements: function() {},
+    enable: function() {},
+    enableVertexAttribArray: function() {},
+    finish: function() {},
+    flush: function() {},
+    framebufferRenderbuffer: function() {},
+    framebufferTexture2D: function() {},
+    frontFace: function() {},
+    generateMipmap: function() {},
+    getActiveAttrib: function() { return { name: 'a_position', size: 1, type: 0x1406 }; },
+    getActiveUniform: function() { return { name: 'u_modelViewMatrix', size: 1, type: 0x8B5C }; },
+    getAttachedShaders: function() { return []; },
+    getAttribLocation: function() { return 0; },
+    getBufferParameter: function() { return 0; },
+    getFramebufferAttachmentParameter: function() { return 0; },
+    getProgramParameter: function(prog, p) {
+      // LINK_STATUS = 0x8B82, COMPILE_STATUS = 0x8B81
+      if (p === 0x8B82) return true; // LINK_STATUS
+      if (p === 0x8B80) return true; // DELETE_STATUS
+      return 0;
+    },
+    getProgramInfoLog: function() { return ''; },
+    getRenderbufferParameter: function() { return 0; },
+    getShaderParameter: function(shader, p) {
+      if (p === 0x8B81) return true; // COMPILE_STATUS
+      if (p === 0x8B80) return true; // DELETE_STATUS
+      return 0;
+    },
+    getShaderInfoLog: function() { return ''; },
+    getShaderPrecisionFormat: function(shaderType, precisionType) {
+      return { rangeMin: 127, rangeMax: 127, precision: 23 };
+    },
+    getShaderSource: function() { return ''; },
+    getTexParameter: function() { return 0; },
+    getUniform: function() { return null; },
+    getUniformLocation: function() { return { _id: nextHandle() }; },
+    getVertexAttrib: function() { return 0; },
+    getVertexAttribOffset: function() { return 0; },
+    hint: function() {},
+    isBuffer: function() { return false; },
+    isContextLost: function() { return false; },
+    isEnabled: function() { return true; },
+    isFramebuffer: function() { return false; },
+    isProgram: function() { return true; },
+    isRenderbuffer: function() { return false; },
+    isShader: function() { return true; },
+    isTexture: function() { return false; },
+    lineWidth: function() {},
+    linkProgram: function() {},
+    pixelStorei: function() {},
+    polygonOffset: function() {},
+    readPixels: function(x, y, width, height, format, type, pixels) {
+      // No real framebuffer to read from — generate deterministic pseudo-
+      // pixels so a fingerprint hash is stable per session. The hash is
+      // over (seed, x, y) so two reads of the same region match, and two
+      // sessions with different seeds produce different hashes.
+      if (!pixels) return;
+      var SEED = (globalThis.__obscura_webgl_vendor || 'I').charCodeAt(0) * 0x100000001b3
+        ^ (globalThis.__obscura_webgl_renderer || 'I').charCodeAt(0) * 0x9E3779B1;
+      SEED = SEED >>> 0;
+      function mix(state) {
+        state = (state + 0x9E3779B1) >>> 0;
+        var z = state;
+        z = ((z ^ (z >>> 16)) * 0x85EBCA6B) >>> 0;
+        z = ((z ^ (z >>> 13)) * 0xC2B2AE35) >>> 0;
+        return (z ^ (z >>> 16)) >>> 0;
+      }
+      var idx = 0;
+      var isUint8 = pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray;
+      if (!isUint8) return; // only handle UBYTE for now
+      for (var py = 0; py < height; py++) {
+        for (var px = 0; px < width; px++) {
+          var s = (SEED + 0x9E3779B1 + (x + px) * 0x100000001b3 + (y + py) * 0x517CC1B727220A95) >>> 0;
+          var v = mix(s);
+          pixels[idx]   = (v & 0xFF); idx++;
+          pixels[idx]   = ((v >>> 8) & 0xFF); idx++;
+          pixels[idx]   = ((v >>> 16) & 0xFF); idx++;
+          pixels[idx]   = ((v >>> 24) & 0xFF); idx++;
+        }
+      }
+    },
+    renderbufferStorage: function() {},
+    sampleCoverage: function() {},
+    scissor: function() {},
+    shaderSource: function() {},
+    stencilFunc: function() {},
+    stencilFuncSeparate: function() {},
+    stencilMask: function() {},
+    stencilMaskSeparate: function() {},
+    stencilOp: function() {},
+    stencilOpSeparate: function() {},
+    texImage2D: function() {},
+    texParameterf: function() {},
+    texParameteri: function() {},
+    texSubImage2D: function() {},
+    uniform1f: function() {},
+    uniform1fv: function() {},
+    uniform1i: function() {},
+    uniform1iv: function() {},
+    uniform2f: function() {},
+    uniform2fv: function() {},
+    uniform2i: function() {},
+    uniform2iv: function() {},
+    uniform3f: function() {},
+    uniform3fv: function() {},
+    uniform3i: function() {},
+    uniform3iv: function() {},
+    uniform4f: function() {},
+    uniform4fv: function() {},
+    uniform4i: function() {},
+    uniform4iv: function() {},
+    uniformMatrix2fv: function() {},
+    uniformMatrix3fv: function() {},
+    uniformMatrix4fv: function() {},
+    useProgram: function() {},
+    validateProgram: function() {},
+    vertexAttrib1f: function() {},
+    vertexAttrib1fv: function() {},
+    vertexAttrib2f: function() {},
+    vertexAttrib2fv: function() {},
+    vertexAttrib3f: function() {},
+    vertexAttrib3fv: function() {},
+    vertexAttrib4f: function() {},
+    vertexAttrib4fv: function() {},
+    vertexAttribPointer: function() {},
+    viewport: function() {},
+  };
+  // Copy methods onto ctx, bound.
+  for (var name in methods) {
+    ctx[name] = methods[name];
+  }
+  // Forge toString so anti-bot code that checks `fn.toString()` sees
+  // `function name() { [native code] }` instead of the JS source.
+  // Matches stygian's `_defineNative` approach.
+  if (typeof _markNative === 'function') {
+    for (var name in methods) {
+      try { _markNative(ctx[name]); } catch(_) {}
+    }
+  }
+  return ctx;
+}
+
+globalThis.__obscura_makeWebGLContext = _makeWebGLContext;
+
 globalThis.WebGLRenderingContext = class WebGLRenderingContext {};
-globalThis.WebGL2RenderingContext = class WebGL2RenderingContext {};
+globalThis.WebGL2RenderingContext = class WebGL2RenderingContext extends WebGLRenderingContext {};
 
 class Screen {
   constructor(w, h, availW, availH) {
@@ -6747,6 +8026,38 @@ globalThis.fetch = async (input, init = {}) => {
   url = _resolveUrl(url);
   const method = init.method || (input instanceof Request ? input.method : "GET");
   let _h = init.headers instanceof Headers ? Object.fromEntries(init.headers.entries()) : (init.headers || {});
+  // Fetch spec(Forbidden header name):Referer 不能由 JS 头设置 —— 由
+  // init.referrer/referrerPolicy 决定。Chrome 忽略手动 Referer(CF 会对
+  // "JS 层带 Referer"的非浏览器特征直接 403)。
+  for (const hk of Object.keys(_h)) {
+    if (hk.toLowerCase() === "referer" || hk.toLowerCase() === "host" || hk.toLowerCase() === "content-length") {
+      delete _h[hk];
+    }
+  }
+  // referrer 默认 "about:client"(= 当前页面 URL);referrerPolicy 默认
+  // strict-origin-when-cross-origin(同源发完整 URL,跨源发 origin)。
+  const docUrl = _domParse("document_url") || "";
+  let referrerOut = "";
+  if (init.referrer !== undefined && init.referrer !== "" && init.referrer !== "no-referrer") {
+    referrerOut = init.referrer === "client" || init.referrer === "about:client" ? docUrl : String(init.referrer);
+  } else if (init.referrer === "no-referrer") {
+    referrerOut = "";
+  } else {
+    referrerOut = docUrl;
+  }
+  try {
+    const ru = new URL(referrerOut, docUrl || "about:blank");
+    const tu = new URL(url, docUrl || "about:blank");
+    const sameOriginReq = ru.origin === tu.origin;
+    const policy = init.referrerPolicy || "strict-origin-when-cross-origin";
+    if (policy === "no-referrer" || (!sameOriginReq && (policy === "same-origin" || policy === "strict-origin"))) {
+      referrerOut = "";
+    } else if (!sameOriginReq && policy === "strict-origin-when-cross-origin") {
+      referrerOut = ru.origin;
+    }
+    // 同源:完整 URL(去 fragment)✓ 默认
+    if (referrerOut) _h["Referer"] = referrerOut.replace(/#.*$/, "");
+  } catch(e) {}
   const body = _serializeBody(init.body, _h);
   const hdrs = JSON.stringify(_h);
   const fetchMode = init.mode || (input instanceof Request ? input.mode : "cors");
@@ -7229,8 +8540,24 @@ if (!Element.prototype.replaceWith) {
   Element.prototype.replaceWith = function(...nodes) {
     const parent = this.parentNode;
     if (!parent) return;
-    for (const n of _convertNodes(nodes)) parent.insertBefore(n, this);
-    parent.removeChild(this);
+    // 逐字对齐 Servo replace_with + ReplaceChild(dom/node/node.rs:1285/3813):
+    // node = 参数转单节点(多参打包 Fragment);viableNextSibling = 参数外首个
+    // 后续兄弟;node !== this → 先移除 this;nodes(frag 拆子)按序插回 viable 前。
+    const list = _convertNodes(nodes);
+    const inList = new Set(list);
+    let viable = this.nextSibling;
+    while (viable && inList.has(viable)) viable = viable.nextSibling;
+    let node;
+    if (list.length === 1) node = list[0];
+    else {
+      node = (globalThis.document || document).createDocumentFragment();
+      for (const n of list) node.appendChild(n);
+    }
+    // Servo Step 11:仅当 child 仍挂在 parent 下才移除 —— this 可能已被参数
+    // 打包进 frag(此时 parentNode 是 frag,不是 parent)。
+    if (node !== this && this.parentNode === parent) parent.removeChild(this);
+    const kids = (node instanceof DocumentFragment) ? Array.from(node.childNodes) : [node];
+    for (const k of kids) parent.insertBefore(k, viable);
   };
   _markNative(Element.prototype.replaceWith);
 }
@@ -7246,8 +8573,16 @@ if (!Element.prototype.after) {
   Element.prototype.after = function(...nodes) {
     const parent = this.parentNode;
     if (!parent) return;
-    const ref = this.nextSibling;
-    for (const n of _convertNodes(nodes)) parent.insertBefore(n, ref);
+    // WHATWG after 的 pre-insert:锚 = viable next sibling(child 的第一个
+    // 不在参数里的后续兄弟,null 时 append),参数**正序**插入 —— 移出原位
+    // 与插入顺序的相互作用自动给出正确结果:
+    // after('text', child) → [text, child];after(child,x) on [x,child] →
+    // [child,x];after(x,y,z) on [y,child,x] → [child,x,y,z]。
+    const list = _convertNodes(nodes);
+    const inList = new Set(list);
+    let ref = this.nextSibling;
+    while (ref && inList.has(ref)) ref = ref.nextSibling;
+    for (const n of list) parent.insertBefore(n, ref);
   };
   _markNative(Element.prototype.after);
 }
@@ -8554,8 +9889,14 @@ globalThis.MutationObserver = class MutationObserver {
     });
   }
 };
-globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNodes, attributeName, oldValue) {
+globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNodes, attributeName, oldValue, prevNid, nextNid) {
   if (!globalThis.__mutationObservers.length) return;
+  // Servo SuppressObserver 按调用点区分:批量操作只抑制"目标节点自身"的
+  // record,旧 parent 的 record 独立发出。__moSuppressTarget = 需抑制的
+  // target nid 或 'all'。
+  const _sTarget = globalThis.__moSuppressTarget;
+  if (_sTarget === 'all') return;
+  if (_sTarget != null && _sTarget === target_nid) return;
   // Use `_wrap` (the canonical node-id → wrapper resolver) instead of a
   // direct cache poke. The previous code referenced `globalThis._cache`,
   // but `_cache` is a module-local Map — the lookup always returned
@@ -8572,10 +9913,16 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
     addedNodes: (addedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
     removedNodes: (removedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
     attributeName: attributeName || null,
+    attributeNamespace: null,
     oldValue: oldValue ?? null,
     previousSibling: null,
     nextSibling: null,
   };
+  // sibling 锚点:spec 上 record 的 previousSibling/nextSibling 取"第一个
+  // added 或 removed 节点"在变化时的前后邻居(removed 的邻居必须在移除前抓,
+  // 所以由调用点传 _prevNid/_nextNid)。
+  if (prevNid != null) { const w = _wrap(prevNid); if (w) record.previousSibling = w; }
+  if (nextNid != null) { const w = _wrap(nextNid); if (w) record.nextSibling = w; }
   // Walk target → ancestors so a subtree-mode observer rooted at any
   // ancestor matches. The previous implementation just checked that
   // `target.contains` and `target.closest` were defined (always true on
@@ -8786,7 +10133,6 @@ class CustomElementRegistry {
 }
 globalThis.CustomElementRegistry = CustomElementRegistry;
 globalThis.customElements = new CustomElementRegistry();
-globalThis.HTMLUnknownElement = Element;
 // ElementInternals: form-associated custom element internals. Validity/state
 // are JS-observable; ARIA reflection that needs the accessibility tree is not.
 globalThis.ElementInternals = class ElementInternals {
@@ -9300,7 +10646,13 @@ globalThis.__obscura_setInputFiles = function(el, specs) {
 globalThis.Event = class Event {
   constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=Date.now();this._propagationStopped=false;this._immediatePropagationStopped=false; }
   get isTrusted() { return _trustedEvents.has(this); }
-  preventDefault() { if (this.cancelable) this.defaultPrevented=true; } stopPropagation(){ this._propagationStopped=true; } stopImmediatePropagation(){ this._propagationStopped=true; this._immediatePropagationStopped=true; }
+  // IE legacy 别名(React/老站点/WPT defaultPrevented 测试引用)
+  get srcElement() { return this.target; }
+  preventDefault() { if (this.cancelable) this.defaultPrevented=true; }
+  // legacy returnValue(spec:cancelable 时 false ⇒ preventDefault;true ⇒ 重置)
+  get returnValue() { return this.cancelable ? !this.defaultPrevented : true; }
+  set returnValue(v) { if (!this.cancelable) return; if (!v) this.preventDefault(); else this.defaultPrevented = false; }
+  stopPropagation(){ this._propagationStopped=true; } stopImmediatePropagation(){ this._propagationStopped=true; this._immediatePropagationStopped=true; }
   initEvent(type,bubbles,cancelable) { if (arguments.length < 1) throw new TypeError("Failed to execute 'initEvent' on 'Event': 1 argument required, but only 0 present."); this.type=String(type);this.bubbles=!!bubbles;this.cancelable=!!cancelable;this.defaultPrevented=false;this._propagationStopped=false;this._immediatePropagationStopped=false; }
   composedPath() {
     if (!this.target) return [];
@@ -9324,6 +10676,12 @@ globalThis.CustomEvent = class extends Event {
     this.detail = detail;
   }
 };
+// DOM spec:Event 静态相位常量(WPT 与框架代码直接引用)。
+Event.CAPTURING_PHASE = 1;
+Event.AT_TARGET = 2;
+Event.BUBBLING_PHASE = 3;
+Event.NONE = 0;
+
 globalThis.MouseEvent = class extends Event {
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.screenX=o.screenX||0;this.screenY=o.screenY||0;this.clientX=o.clientX||0;this.clientY=o.clientY||0;this.ctrlKey=!!o.ctrlKey;this.altKey=!!o.altKey;this.shiftKey=!!o.shiftKey;this.metaKey=!!o.metaKey;this.button=o.button||0;this.buttons=o.buttons||0;this.relatedTarget=o.relatedTarget||null; }
   // Legacy DOM Level 2 initializer. Positional signature per UI Events spec.
@@ -10998,14 +12356,127 @@ globalThis.CSS = {
   escape(s){ return s; }
 };
 
-globalThis.HTMLElement = Element;
-globalThis.HTMLDivElement = Element;
-globalThis.HTMLSpanElement = Element;
-globalThis.HTMLParagraphElement = Element;
-globalThis.HTMLAnchorElement = Element;
+// HTMLElement 是 HTML 命名空间元素的公共基类(真实浏览器层级:
+// Element → HTMLElement → 具体 HTML 类)。SVG/XML 元素 instanceof HTMLElement
+// 必须为 false(WPT createElementNS 断言),所以不能再用 Element 别名。
+class HTMLElement extends Element {
+  get namespaceURI() { return "http://www.w3.org/1999/xhtml"; }
+}
+globalThis.HTMLElement = HTMLElement;
+globalThis.HTMLDivElement = HTMLElement;
+class HTMLDetailsElement extends HTMLElement {}
+globalThis.HTMLDetailsElement = HTMLDetailsElement;
+class HTMLLabelElement extends HTMLElement {}
+globalThis.HTMLLabelElement = HTMLLabelElement;
+class HTMLTableElement extends HTMLElement {}
+globalThis.HTMLTableElement = HTMLTableElement;
+class HTMLIFrameElement extends HTMLElement {}
+globalThis.HTMLIFrameElement = HTMLIFrameElement;
+class HTMLScriptElement extends HTMLElement {}
+globalThis.HTMLScriptElement = HTMLScriptElement;
+class HTMLStyleElement extends HTMLElement {}
+globalThis.HTMLStyleElement = HTMLStyleElement;
+class HTMLLinkElement extends HTMLElement {}
+globalThis.HTMLLinkElement = HTMLLinkElement;
+class HTMLMetaElement extends HTMLElement {}
+globalThis.HTMLMetaElement = HTMLMetaElement;
+class HTMLHeadElement extends HTMLElement {}
+globalThis.HTMLHeadElement = HTMLHeadElement;
+class HTMLBodyElement extends HTMLElement {}
+globalThis.HTMLBodyElement = HTMLBodyElement;
+class HTMLHtmlElement extends HTMLElement {}
+globalThis.HTMLHtmlElement = HTMLHtmlElement;
+class HTMLBRElement extends HTMLElement {}
+globalThis.HTMLBRElement = HTMLBRElement;
+class HTMLHRElement extends HTMLElement {}
+globalThis.HTMLHRElement = HTMLHRElement;
+class HTMLUListElement extends HTMLElement {}
+globalThis.HTMLUListElement = HTMLUListElement;
+class HTMLOListElement extends HTMLElement {}
+globalThis.HTMLOListElement = HTMLOListElement;
+class HTMLLIElement extends HTMLElement {}
+globalThis.HTMLLIElement = HTMLLIElement;
+class HTMLPreElement extends HTMLElement {}
+globalThis.HTMLPreElement = HTMLPreElement;
+class HTMLHeadingElement extends HTMLElement {}
+globalThis.HTMLHeadingElement = HTMLHeadingElement;
+class HTMLTemplateElement extends HTMLElement {}
+globalThis.HTMLTemplateElement = HTMLTemplateElement;
+class HTMLSlotElement extends HTMLElement {}
+globalThis.HTMLSlotElement = HTMLSlotElement;
+class HTMLOptionElement extends HTMLElement {}
+globalThis.HTMLOptionElement = HTMLOptionElement;
+class HTMLDataListElement extends HTMLElement {}
+globalThis.HTMLDataListElement = HTMLDataListElement;
+class HTMLFieldSetElement extends HTMLElement {}
+globalThis.HTMLFieldSetElement = HTMLFieldSetElement;
+class HTMLLegendElement extends HTMLElement {}
+globalThis.HTMLLegendElement = HTMLLegendElement;
+class HTMLProgressElement extends HTMLElement {}
+globalThis.HTMLProgressElement = HTMLProgressElement;
+class HTMLDialogElement extends HTMLElement {}
+globalThis.HTMLDialogElement = HTMLDialogElement;
+class HTMLSpanElement extends HTMLElement {}
+globalThis.HTMLSpanElement = HTMLSpanElement;
+// Servo components/script/dom/html/htmlunknownelement.rs:HTMLUnknownElement
+// extends HTMLElement(HTMLElement true / HTMLSpanElement false)
+class HTMLUnknownElement extends HTMLElement {}
+globalThis.HTMLUnknownElement = HTMLUnknownElement;
+class HTMLAreaElement extends HTMLElement {}
+class HTMLBaseElement extends HTMLElement {}
+class HTMLDataElement extends HTMLElement {}
+class HTMLDirectoryElement extends HTMLElement {}
+class HTMLDListElement extends HTMLElement {}
+class HTMLEmbedElement extends HTMLElement {}
+class HTMLFontElement extends HTMLElement {}
+class HTMLFrameElement extends HTMLElement {}
+class HTMLFrameSetElement extends HTMLElement {}
+class HTMLMapElement extends HTMLElement {}
+class HTMLMeterElement extends HTMLElement {}
+class HTMLModElement extends HTMLElement {}
+class HTMLObjectElement extends HTMLElement {}
+class HTMLOptGroupElement extends HTMLElement {}
+class HTMLOutputElement extends HTMLElement {}
+class HTMLParamElement extends HTMLElement {}
+class HTMLQuoteElement extends HTMLElement {}
+class HTMLSourceElement extends HTMLElement {}
+class HTMLTableCaptionElement extends HTMLElement {}
+class HTMLTableCellElement extends HTMLElement {}
+class HTMLTableColElement extends HTMLElement {}
+class HTMLTableRowElement extends HTMLElement {}
+class HTMLTableSectionElement extends HTMLElement {}
+class HTMLTimeElement extends HTMLElement {}
+class HTMLTitleElement extends HTMLElement {}
+globalThis.HTMLAreaElement = HTMLAreaElement;
+globalThis.HTMLBaseElement = HTMLBaseElement;
+globalThis.HTMLDataElement = HTMLDataElement;
+globalThis.HTMLDirectoryElement = HTMLDirectoryElement;
+globalThis.HTMLDListElement = HTMLDListElement;
+globalThis.HTMLEmbedElement = HTMLEmbedElement;
+globalThis.HTMLFontElement = HTMLFontElement;
+globalThis.HTMLFrameElement = HTMLFrameElement;
+globalThis.HTMLFrameSetElement = HTMLFrameSetElement;
+globalThis.HTMLMapElement = HTMLMapElement;
+globalThis.HTMLMeterElement = HTMLMeterElement;
+globalThis.HTMLModElement = HTMLModElement;
+globalThis.HTMLObjectElement = HTMLObjectElement;
+globalThis.HTMLOptGroupElement = HTMLOptGroupElement;
+globalThis.HTMLOutputElement = HTMLOutputElement;
+globalThis.HTMLParamElement = HTMLParamElement;
+globalThis.HTMLQuoteElement = HTMLQuoteElement;
+globalThis.HTMLSourceElement = HTMLSourceElement;
+globalThis.HTMLTableCaptionElement = HTMLTableCaptionElement;
+globalThis.HTMLTableCellElement = HTMLTableCellElement;
+globalThis.HTMLTableColElement = HTMLTableColElement;
+globalThis.HTMLTableRowElement = HTMLTableRowElement;
+globalThis.HTMLTableSectionElement = HTMLTableSectionElement;
+globalThis.HTMLTimeElement = HTMLTimeElement;
+globalThis.HTMLTitleElement = HTMLTitleElement;
+globalThis.HTMLParagraphElement = HTMLElement;
+globalThis.HTMLAnchorElement = HTMLElement;
 globalThis.HTMLImageElement = HTMLImageElement;
-globalThis.HTMLInputElement = Element;
-globalThis.HTMLButtonElement = Element;
+globalThis.HTMLInputElement = HTMLElement;
+globalThis.HTMLButtonElement = HTMLElement;
 globalThis.HTMLFormElement = class HTMLFormElement extends Element {
   get elements() { return HTMLCollection._from(this.querySelectorAll("input, select, textarea, button, fieldset, output, object")); }
   get length() { return this.elements.length; }
@@ -11013,7 +12484,7 @@ globalThis.HTMLFormElement = class HTMLFormElement extends Element {
   // 'submit' event and (if not prevented) builds form data and navigates.
   reset() { for (const f of this.elements) { if ('value' in f) f.value = ''; } }
 };
-globalThis.HTMLSelectElement = Element;
+globalThis.HTMLSelectElement = HTMLElement;
 globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends Element {
   // `rows`/`cols` reflect the content attributes and drive the control's
   // intrinsic box (the renderer sizes a textarea from them). The attributes
@@ -11031,34 +12502,7 @@ globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends Element {
   }
   set cols(v) { this.setAttribute('cols', String(v)); }
 };
-globalThis.HTMLLabelElement = Element;
-globalThis.HTMLTableElement = Element;
-globalThis.HTMLIFrameElement = Element;
-globalThis.HTMLCanvasElement = Element;
 // HTMLVideoElement and HTMLAudioElement are defined above with canPlayType support.
-globalThis.HTMLScriptElement = Element;
-globalThis.HTMLStyleElement = Element;
-globalThis.HTMLLinkElement = Element;
-globalThis.HTMLMetaElement = Element;
-globalThis.HTMLHeadElement = Element;
-globalThis.HTMLBodyElement = Element;
-globalThis.HTMLHtmlElement = Element;
-globalThis.HTMLBRElement = Element;
-globalThis.HTMLHRElement = Element;
-globalThis.HTMLUListElement = Element;
-globalThis.HTMLOListElement = Element;
-globalThis.HTMLLIElement = Element;
-globalThis.HTMLPreElement = Element;
-globalThis.HTMLHeadingElement = Element;
-globalThis.HTMLTemplateElement = Element;
-globalThis.HTMLSlotElement = Element;
-globalThis.HTMLOptionElement = Element;
-globalThis.HTMLDataListElement = Element;
-globalThis.HTMLFieldSetElement = Element;
-globalThis.HTMLLegendElement = Element;
-globalThis.HTMLProgressElement = Element;
-globalThis.HTMLDetailsElement = Element;
-globalThis.HTMLDialogElement = Element;
 // SVGAnimatedString backs the className and href reflections on SVG elements.
 // baseVal and animVal both read the live attribute (no SMIL animation), and
 // baseVal is writable. Used by the SVG-aware get className()/get href() above.
@@ -11152,6 +12596,134 @@ for (const _proto of [Document.prototype, DocumentFragment.prototype]) {
   _proto.replaceChildren = Element.prototype.replaceChildren;
 }
 globalThis.EventTarget = Node;
+
+// Live HTMLCollection based on fastrender's makeLiveElementCollection.
+// Uses Object.create (not Array) to avoid length conflicts.
+function _makeLiveCollection(root, tag) {
+  return _makeLiveSelectorCollection(root, String(tag).toLowerCase());
+}
+function _makeLiveSelectorCollection(root, selector) {
+  return _makeLiveCollectionByEls(root, function() { return root.querySelectorAll(selector); });
+}
+// getEls() 每次调用返回"当前时刻"的元素数组;集合因此是 live 的,
+// 不依赖 mutation 通知(WPT live 断言:append 后 length 立即变化)。
+function _makeLiveCollectionByEls(root, getEls) {
+  // 目标对象保持轻:不定义自有 item/namedItem(WPT 断言它们与
+  // HTMLCollection.prototype 上的原生函数同一),length 用可配置 getter
+  // 供 Reflect.get 路径使用,但 gOPD/ownKeys 把它隐藏(与
+  // _htmlCollectionProxy 相同的 WPT 约定:getOwnPropertyNames 只含
+  // 索引与命名键)。
+  var target = Object.create(HTMLCollection.prototype);
+  Object.defineProperty(target, 'length', {
+    get: function() { return getEls().length; },
+    configurable: true,
+  });
+  function isArrayIndex(k) {
+    return typeof k === 'string' && k === String(k >>> 0) && +k < 4294967295;
+  }
+  // 内部命名查找:直接扫 getEls()。不要用
+  // HTMLCollection.prototype.namedItem.call(t, …) —— t 是代理的 target,
+  // 原型实现里 this[i] 会绕过代理陷阱全部变成 undefined。
+  function namedLookup(k) {
+    var els = getEls();
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (!el) continue;
+      if (el.id === k) return el;
+      if (_isHTMLEl(el) && typeof el.getAttribute === 'function' && el.getAttribute('name') === k) return el;
+    }
+    return null;
+  }
+  return new Proxy(target, {
+    get: function(t, k, r) {
+      if (k === 'length') return getEls().length;
+      if (isArrayIndex(k)) {
+        var els = getEls();
+        return els[k] !== undefined ? els[k] : undefined;
+      }
+      var v = Reflect.get(t, k, r);
+      if (v !== undefined || typeof k !== 'string') return v;
+      return namedLookup(k) || undefined;
+    },
+    has: function(t, k) {
+      if (k === 'length') return true;
+      if (isArrayIndex(k)) return +k < getEls().length;
+      if (Reflect.has(t, k)) return true;
+      return typeof k === 'string' && !!namedLookup(k);
+    },
+    getOwnPropertyDescriptor: function(t, k) {
+      if (k === 'length') return undefined;
+      if (isArrayIndex(k)) {
+        var els = getEls();
+        if (+k < els.length) return { value: els[k], writable: false, enumerable: true, configurable: true };
+        return undefined;
+      }
+      var own = Object.getOwnPropertyDescriptor(t, k);
+      if (own) return own;
+      if (typeof k === 'string') {
+        var el = namedLookup(k);
+        if (el) return { value: el, writable: false, enumerable: false, configurable: true };
+      }
+      return undefined;
+    },
+    ownKeys: function(t) {
+      var keys = [];
+      var seen = Object.create(null);
+      var els = getEls();
+      for (var i = 0; i < els.length; i++) {
+        keys.push(String(i));
+        seen[String(i)] = true;
+      }
+      for (var j = 0; j < els.length; j++) {
+        var el = els[j];
+        if (!el) continue;
+        if (el.id && !seen[el.id]) { keys.push(el.id); seen[el.id] = true; }
+        if (_isHTMLEl(el) && typeof el.getAttribute === 'function') {
+          var nm = el.getAttribute('name');
+          if (nm && !seen[nm]) { keys.push(nm); seen[nm] = true; }
+        }
+      }
+      return keys;
+    },
+    set: function(t, k, v, r) {
+      if (isArrayIndex(k)) return false;
+      return Reflect.set(t, k, v, r);
+    },
+  });
+}
+
+// getElementsByTagName 的实时集合。匹配规则(DOM 规范):
+// - HTML 命名空间(或 null ns):参数先做 ASCII-only 折叠(只折叠 A-Z;
+//   全 Unicode toLowerCase 会把 "AÇ" 错变成 "aç",而非 ASCII 字符保持原样),
+//   带前缀的参数匹配限定名,不带前缀的匹配 localName;
+// - 其它命名空间:参数按原始大小写精确匹配限定名。
+function _liveElementsByTagName(root, tag) {
+  var lowerTag = tag.replace(/[\x41-\x5a]/g, function(c) { return c.toLowerCase(); });
+  var hasPrefix = tag.indexOf(':') !== -1;
+  function getEls() {
+    var all = root.querySelectorAll('*');
+    var matched = [];
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (!el) continue;
+      var ns = el.namespaceURI;
+      var ln = el.localName;
+      if (ns === 'http://www.w3.org/1999/xhtml' || ns == null || ns === undefined) {
+        if (hasPrefix) {
+          var q = el.prefix ? el.prefix + ':' + ln : ln;
+          if (q === lowerTag) matched.push(el);
+        } else if (ln === lowerTag) matched.push(el);
+      } else {
+        var prefix = el.prefix;
+        var qname = prefix ? prefix + ':' + ln : ln;
+        if (qname === tag) matched.push(el);
+      }
+    }
+    return matched;
+  }
+  return _makeLiveCollectionByEls(root, getEls);
+}
+
 globalThis.HTMLCollection = class HTMLCollection extends Array {
   item(i) {
     i = i >>> 0;
@@ -11175,13 +12747,65 @@ globalThis.HTMLCollection = class HTMLCollection extends Array {
   // made querySelectorAll on large result sets ~26x slower). The Proxy only
   // resolves a name when an unknown string key is actually read.
   static _from(arr) {
-    const c = new HTMLCollection();
-    if (arr) for (let i = 0; i < arr.length; i++) { if (arr[i]) c[c.length] = arr[i]; }
+    // Use Object.create (not new HTMLCollection()) to avoid Array's
+    // non-configurable 'length' property, which forces Proxy ownKeys
+    // to include it. With Object.create + configurable length getter,
+    // ownKeys does not need to include 'length', matching WPT's
+    // getOwnPropertyNames expectations.
+    const c = Object.create(HTMLCollection.prototype);
+    var len = 0;
+    if (arr) for (let i = 0; i < arr.length; i++) { if (arr[i]) { c[len] = arr[i]; len++; } }
+    Object.defineProperty(c, 'length', {
+      get: function() { return len; },
+      configurable: true,
+      enumerable: false,
+    });
     return new Proxy(c, _htmlCollectionProxy);
   }
 };
 _markNative(HTMLCollection.prototype.item);
 _markNative(HTMLCollection.prototype.namedItem);
+
+// HTMLCollection iteration methods. Needed for `for...of`, `forEach`,
+// spread, Array.from, etc. when the collection is not an Array instance
+// (live collections use Object.create, not new HTMLCollection()).
+// Uses this.length and this[i] to avoid Array.from recursion.
+HTMLCollection.prototype.values = function() {
+  var self = this;
+  var i = 0;
+  return {
+    next: function() {
+      if (i >= self.length) return {done: true, value: undefined};
+      return {done: false, value: self[i++]};
+    },
+    [Symbol.iterator]: function() { return this; }
+  };
+};
+HTMLCollection.prototype.keys = function() {
+  var self = this;
+  var i = 0;
+  var len = self.length;
+  return {
+    next: function() { return i < len ? {done: false, value: i++} : {done: true, value: undefined}; },
+    [Symbol.iterator]: function() { return this; }
+  };
+};
+HTMLCollection.prototype.entries = function() {
+  var self = this;
+  var i = 0;
+  return {
+    next: function() {
+      if (i >= self.length) return {done: true, value: undefined};
+      return {done: false, value: [i, self[i++]]};
+    },
+    [Symbol.iterator]: function() { return this; }
+  };
+};
+HTMLCollection.prototype.forEach = function(cb, thisArg) {
+  var len = this.length;
+  for (var i = 0; i < len; i++) cb.call(thisArg, this[i], i, this);
+};
+HTMLCollection.prototype[Symbol.iterator] = HTMLCollection.prototype.values;
 // Shared (allocated once) Proxy traps for HTMLCollection named access. Indices,
 // length, and inherited methods resolve normally via Reflect; only an unknown
 // non-numeric string key falls back to namedItem(), so item/namedItem and the
@@ -11196,6 +12820,123 @@ const _htmlCollectionProxy = {
     if (Reflect.has(t, k)) return true;
     return typeof k === "string" && !!(t.namedItem && t.namedItem(k));
   },
+  getOwnPropertyDescriptor(t, k) {
+    // 'length' is a configurable getter on the target, but WPT expects
+    // getOwnPropertyNames to NOT include it. Return undefined for 'length'
+    // so getOwnPropertyNames filters it out.
+    if (k === 'length') return undefined;
+    const own = Object.getOwnPropertyDescriptor(t, k);
+    if (own) return own;
+    if (typeof k === "string" && t.namedItem) {
+      const el = t.namedItem(k);
+      if (el) {
+        return { value: el, writable: false, enumerable: false, configurable: true };
+      }
+    }
+    return undefined;
+  },
+  ownKeys(t) {
+    var keys = [];
+    var seen = Object.create(null);
+    var ownKeys = Reflect.ownKeys(t);
+    for (var i = 0; i < ownKeys.length; i++) {
+      var k = ownKeys[i];
+      // Exclude 'length' — it's a configurable getter, not a real own
+      // data property. WPT expects getOwnPropertyNames to not include it.
+      if (k === 'length') continue;
+      keys.push(k);
+      seen[k] = true;
+    }
+    if (t.namedItem) {
+      for (var i = 0; i < t.length; i++) {
+        var el = t[i];
+        if (!el) continue;
+        if (el.id && !seen[el.id]) { keys.push(el.id); seen[el.id] = true; }
+        if (_isHTMLEl(el) && typeof el.getAttribute === 'function') {
+          var name = el.getAttribute('name');
+          if (name && !seen[name]) { keys.push(name); seen[name] = true; }
+        }
+      }
+    }
+    return keys;
+  },
+  set(t, k, v, r) {
+    if (typeof k === "string" && k === String(k >>> 0)) {
+      return false;
+    }
+    return Reflect.set(t, k, v, r);
+  },
+};
+
+// Live collection proxy: re-queries DOM on every .length / [i] access.
+// Inherits all named-property behavior from _htmlCollectionProxy but
+// overrides get for numeric indices and length.
+const _liveCollectionProxy = {
+  get(t, k, r) {
+    // Live length: re-query.
+    if (k === 'length') {
+      if (!t._liveRoot) return 0;
+      return t._liveRoot.querySelectorAll(t._liveTag).length;
+    }
+    // Live numeric index: re-query.
+    if (typeof k === 'string' && k === String(k >>> 0) && t._liveRoot) {
+      var els = t._liveRoot.querySelectorAll(t._liveTag);
+      return els[k] || undefined;
+    }
+    const v = Reflect.get(t, k, r);
+    if (v !== undefined || typeof k !== "string") return v;
+    // Named access: use cached or re-query.
+    return t.namedItem ? (t.namedItem(k) || undefined) : undefined;
+  },
+  has(t, k) {
+    if (Reflect.has(t, k)) return true;
+    if (typeof k === 'string' && k === String(k >>> 0) && t._liveRoot) {
+      return +k < t._liveRoot.querySelectorAll(t._liveTag).length;
+    }
+    return typeof k === "string" && !!(t.namedItem && t.namedItem(k));
+  },
+  getOwnPropertyDescriptor(t, k) {
+    const own = Object.getOwnPropertyDescriptor(t, k);
+    if (own) return own;
+    if (typeof k === 'string' && k === String(k >>> 0) && t._liveRoot) {
+      var els = t._liveRoot.querySelectorAll(t._liveTag);
+      if (+k < els.length) return { value: els[k], writable: false, enumerable: true, configurable: true };
+    }
+    if (typeof k === "string" && t.namedItem) {
+      const el = t.namedItem(k);
+      if (el) return { value: el, writable: false, enumerable: true, configurable: true };
+    }
+    return undefined;
+  },
+  ownKeys(t) {
+    var keys = [];
+    var seen = Object.create(null);
+    var ownKeys = Reflect.ownKeys(t);
+    for (var i = 0; i < ownKeys.length; i++) {
+      var k = ownKeys[i];
+      keys.push(k);
+      seen[k] = true;
+    }
+    if (t._liveRoot) {
+      var els = t._liveRoot.querySelectorAll(t._liveTag);
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (!el) continue;
+        if (el.id && !seen[el.id]) { keys.push(el.id); seen[el.id] = true; }
+        if (_isHTMLEl(el) && typeof el.getAttribute === 'function') {
+          var name = el.getAttribute('name');
+          if (name && !seen[name]) { keys.push(name); seen[name] = true; }
+        }
+      }
+    }
+    return keys;
+  },
+  set(t, k, v, r) {
+    if (typeof k === "string" && k === String(k >>> 0)) {
+      return false;
+    }
+    return Reflect.set(t, k, v, r);
+  },
 };
 // True for elements in the HTML namespace (the only ones whose name attribute
 // contributes to an HTMLCollection's supported property names).
@@ -11209,6 +12950,139 @@ function _nodeList(els) {
   for (let i = 0; i < els.length; i++) nl[i] = els[i];
   nl.length = els.length;
   return nl;
+}
+
+// Live childNodes NodeList:按节点缓存同一对象(childNodes === childNodes 成立),
+// 每次访问 length/[i] 都重读实时树(append/remove 立即反映,无需依赖 mutation 通知)。
+// 方法解析:NodeList.prototype 上已挂 Array.prototype 的迭代方法;
+// 其它 Array 泛型方法(indexOf/push/…)经 get 陷阱兜底,receiver 是代理本身,
+// 泛型实现读 this.length/this[i] 会再走陷阱,行为正确。
+function _liveNodeList(owner) {
+  if (owner._childNodesLive) return owner._childNodesLive;
+  const target = Object.create(NodeList.prototype);
+  target._owner = owner;
+  const ids = () => _domParse("child_nodes", owner._nid) || [];
+  const isIndex = (k) => typeof k === 'string' && k === String(k >>> 0);
+  const proxy = new Proxy(target, {
+    get(t, k, r) {
+      if (k === 'length') return ids().length;
+      if (isIndex(k)) {
+        const a = ids(); const i = +k;
+        return i < a.length ? (_wrap(a[i]) || undefined) : undefined;
+      }
+      const v = Reflect.get(t, k, r);
+      if (v !== undefined || typeof k !== 'string') return v;
+      const av = Array.prototype[k];
+      return typeof av === 'function' ? av : undefined;
+    },
+    has(t, k) {
+      if (k === 'length') return true;
+      if (isIndex(k)) return +k < ids().length;
+      return Reflect.has(t, k);
+    },
+    getOwnPropertyDescriptor(t, k) {
+      if (k === 'length') {
+        // WebIDL 平台对象语义:length 是自有 accessor(assert_array_equals
+        // 的 "length" in actual 和 hasOwnProperty 检查依赖这一点)。
+        return { get() { return ids().length; }, enumerable: true, configurable: true };
+      }
+      if (isIndex(k)) {
+        const a = ids(); const i = +k;
+        if (i < a.length) return { value: _wrap(a[i]), writable: false, enumerable: true, configurable: true };
+        return undefined;
+      }
+      return Object.getOwnPropertyDescriptor(t, k);
+    },
+    ownKeys(t) {
+      const keys = ['length'];
+      const a = ids();
+      for (let i = 0; i < a.length; i++) keys.push(String(i));
+      return keys;
+    },
+    set(t, k, v, r) {
+      if (isIndex(k) || k === 'length') return false;
+      return Reflect.set(t, k, v, r);
+    },
+  });
+  owner._childNodesLive = proxy;
+  return proxy;
+}
+
+// DOM 规范 pre-insertion 校验(WPT Node-appendChild/Node-insertBefore/pre-insertion-*
+// 断言)。规范对步骤顺序有明确要求,WPT 专门测顺序(notfound.js):
+//   步骤1 父节点类型(非 Document/DF/Element)→ HierarchyRequestError
+//   步骤2 node 是 parent 的包含祖先 → HierarchyRequestError
+//   步骤3 ref 不是 parent 的孩子 → NotFoundError
+//   步骤4+ node 类型/document 内容规则 → HierarchyRequestError
+// 所以拆成两个阶段:_validateParentForInsertion/_isInclusiveAncestor 在
+// NotFoundError 之前,_validateNodeContent 在其后。appendChild 无 ref,
+// 顺序上步骤2 交给 Rust 侧的环检测(no-op → JS 抛 HierarchyRequestError)。
+function _validateParentForInsertion(parent) {
+  const pt = parent.nodeType;
+  if (pt !== 1 && pt !== 9 && pt !== 11) {
+    throw new DOMException(
+      "Failed to execute the insertion operation on 'Node': this node type does not accept children.",
+      "HierarchyRequestError",
+    );
+  }
+}
+function _isInclusiveAncestor(node, of) {
+  let n = of;
+  while (n) {
+    if (n === node) return true;
+    n = n.parentNode;
+  }
+  return false;
+}
+function _validateNodeContent(parent, node, ref) {
+  const t = node.nodeType, pt = parent.nodeType;
+  const hre = () => new DOMException(
+    "Failed to execute the insertion operation on 'Node': The new child would create an invalid tree.",
+    "HierarchyRequestError",
+  );
+  if (t === 9 || t === 2) throw hre();
+  if (t === 10 && pt !== 9) throw hre();
+  if (pt === 9) {
+    if (t === 3) throw hre();
+    if (t === 1 || t === 10 || t === 11) {
+      // 位置感知(WPT pre-insertion-validation-hierarchy):
+      // - 插元素:插入点前/后已有 element,或 append 时存在 doctype → HRE;
+      //   insertBefore 到 doctype 之前(doctype 在 ref 及其后)合法。
+      // - 插 doctype:任何位置已有 doctype,或 insertBefore 时 ref 之前
+      //   存在 element → HRE;插到 element 之前合法。
+      // - fragment:调用方逐子节点走 appendChild/insertBefore,天然复用。
+      let elBefore = false, elAfter = false, dtBefore = false, dtAfter = false;
+      if (ref == null) {
+        for (let c = parent.firstChild; c; c = c.nextSibling) {
+          const ct = c.nodeType;
+          if (ct === 1) elBefore = true; else if (ct === 10) dtBefore = true;
+        }
+        if (t === 1) { if (elBefore || dtBefore) throw hre(); }
+        else if (t === 10) { if (dtBefore || elBefore) throw hre(); }
+      } else {
+        let atRef = false;
+        for (let c = parent.firstChild; c; c = c.nextSibling) {
+          if (!atRef && c === ref) atRef = true;
+          const ct = c.nodeType;
+          if (!atRef) { if (ct === 1) elBefore = true; else if (ct === 10) dtBefore = true; }
+          else { if (ct === 1) elAfter = true; else if (ct === 10) dtAfter = true; }
+        }
+        if (t === 1) { if (elBefore || elAfter || dtAfter) throw hre(); }
+        else if (t === 10) { if (dtBefore || dtAfter || elBefore) throw hre(); }
+      }
+    }
+  }
+}
+
+// 记录游离节点的创建者 document(仅非全局文档才打点,零开销于主文档路径)。
+// ownerDocument getter 在节点未连接时读取该标记。
+function _stampOwnerDoc(node, doc) {
+  // 无条件盖章:iframe 文档创建的节点传到主 realm 时,ownerDocument getter
+  // 必须 reflect 创建文档(此前用 globalThis.document 比对,iframe realm 里
+  // globalThis.document 就是 iframe 文档 → 判等 → 不设 → 跨 realm 后
+  // ownerDocument 错指主文档,WPT createElementNS 断言全挂)。
+  if (doc) node._ownerDocument = doc;
+  return node;
 }
 
 // Window named access. HTML exposes every element id, plus the name of a
@@ -11275,6 +13149,20 @@ function _ensureWindowNamedProperty(name) {
   try {
     Object.defineProperty(globalThis, name, {
       get() { return _windowNamedValue(name); },
+      set(v) {
+        // 真实浏览器语义:脚本对 window 同名属性赋值会遮蔽命名访问。
+        // 这个 accessor 没有 setter 时,赋值在非严格模式下被静默吞掉
+        // (WPT testharness 的 window.test = fn 因此丢失,页面全部
+        // 测试注册失败)。赋值时用数据属性替换自身,并从命名集合
+        // 注销,避免 reconcile 在元素消失时误删脚本写的值。
+        _windowNamedPropertyNames.delete(name);
+        Object.defineProperty(globalThis, name, {
+          value: v,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      },
       configurable: true,
       enumerable: true,
     });
@@ -11347,18 +13235,19 @@ globalThis.DOMTokenList = DOMTokenList;
 globalThis.NodeList = class NodeList {
   constructor() { this.length = 0; }
   item(i) { i = i >>> 0; return this[i] != null ? this[i] : null; }
-  forEach(cb, thisArg) {
-    for (let i = 0; i < this.length; i++) cb.call(thisArg, this[i], i, this);
-  }
-  *[Symbol.iterator]() { for (let i = 0; i < this.length; i++) yield this[i]; }
-  *entries() { for (let i = 0; i < this.length; i++) yield [i, this[i]]; }
-  *keys() { for (let i = 0; i < this.length; i++) yield i; }
-  *values() { for (let i = 0; i < this.length; i++) yield this[i]; }
   get [Symbol.toStringTag]() { return 'NodeList'; }
 };
+// WebIDL 值迭代器:NodeList 的 forEach/keys/values/entries/[Symbol.iterator]
+// 就是 Array.prototype 上的同名函数对象(WPT Node-childNodes 断言函数同一性,
+// 且 Array.prototype.keys 返回的迭代器 instanceof Array 为 false)。
+// 注意:不能对这些借用来的函数做 _markNative,否则会污染 Array.prototype。
+NodeList.prototype.forEach = Array.prototype.forEach;
+NodeList.prototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
+NodeList.prototype.keys = Array.prototype.keys;
+NodeList.prototype.values = Array.prototype.values;
+NodeList.prototype.entries = Array.prototype.entries;
 _markNative(NodeList);
 _markNative(NodeList.prototype.item);
-_markNative(NodeList.prototype.forEach);
 // Live Range over the real DOM tree. dom/ranges/* tests are pure boundary-point
 // algorithms (no layout, no editing engine), so a property-storing Range with
 // correct tree-order comparison passes them. Mutating ops (extract/delete/
@@ -11515,8 +13404,63 @@ globalThis.Range = class Range {
   cloneContents() { return (globalThis.document || document).createDocumentFragment(); }
   extractContents() { return (globalThis.document || document).createDocumentFragment(); }
   deleteContents() {}
-  insertNode(node) { if (node && this._sc && this._sc.insertBefore) { const kids = this._sc.childNodes; this._sc.insertBefore(node, kids[this._so] || null); } }
-  surroundContents(node) { this.insertNode(node); }
+  insertNode(node) {
+    // spec Range.insertNode:container = start 边界所在节点;若为 Text/
+    // Comment/CDATA,先在 start offset 分裂,container 变为其父(分裂
+    // 产生一条 characterData/childList 通知,随后才是插入通知)。
+    if (!node) return;
+    let container = this._sc;
+    let offset = this._so;
+    if (container && (container.nodeType === 3 || container.nodeType === 4 || container.nodeType === 8)) {
+      const parent = container.parentNode;
+      if (!parent) return;
+      const after = container.splitText(offset);
+      parent.insertBefore(node, after);
+      return;
+    }
+    if (container && container.insertBefore) {
+      const kids = container.childNodes;
+      container.insertBefore(node, kids[offset] || null);
+    }
+  }
+  surroundContents(node) {
+    // spec:surroundContents = extractContents 范围子树 → 新节点包裹 →
+    // 插回。setStartBefore/setEndAfter 形态下 startContainer=父元素,
+    // 范围=其全部子节点。WPT 期望 3 条 record:removed×2 + added×1。
+    const sc = this._sc, so = this._so, ec = this._ec, eo = this._eo;
+    if (node && sc && sc.nodeType === 1 && sc === ec) {
+      const kids = Array.from(sc.childNodes);
+      const first = kids[so] || null;
+      const lastIdx = eo - 1;
+      const last = kids[lastIdx] || kids[kids.length - 1] || null;
+      if (first && last) {
+        const removedNodes = [];
+        let sib = first;
+        while (sib) { removedNodes.push(sib); if (sib === last) break; sib = sib.nextSibling; }
+        globalThis.__moSuppressTarget = 'all';
+        const frag = (globalThis.document || document).createDocumentFragment();
+        try {
+          // 逐个摘除并逐条通知:sibling 锚点必须反映"当时"的树
+          // (WPT record① 的 nextSibling 期望 null —— s2 已在 record②
+          // 之前被摘走)。
+          const obs = globalThis.__mutationObservers?.length;
+          for (const rn of removedNodes) {
+            const prev = rn.previousSibling, next = rn.nextSibling;
+            frag.appendChild(rn);
+            if (obs) globalThis.__notifyMutation('childList', sc._nid, [], [rn._nid], null, null,
+              prev ? prev._nid : null, next ? next._nid : null);
+          }
+          const anchor = kids[eo] || null;
+          sc.insertBefore(node, anchor);
+          if (obs) globalThis.__notifyMutation('childList', sc._nid, [node._nid], []);
+          // 摘下的子挂进新节点(内部移动不发 record,总量由上面的 3 条覆盖)
+          while (frag.firstChild) node.appendChild(frag.firstChild);
+        } finally { globalThis.__moSuppressTarget = null; }
+        return;
+      }
+    }
+    this.insertNode(node);
+  }
   detach() {}
   getBoundingClientRect() {
     if (this.collapsed) return new DOMRect();
@@ -11643,38 +13587,127 @@ _markNative(globalThis.Selection);
   XMLSerializer, XMLSerializer.prototype.serializeToString,
 ].forEach(fn => { if (typeof fn === 'function') _markNative(fn); });
 
-class _IframeDocument {
+class _IframeDocument extends Document {
   constructor(html, url, iframeEl) {
+    // 真实 backing 树:之前是纯 JS 假对象,节点没有 _nid 树,WPT 的
+    // ownerDocument 同一性与树操作断言全部失败。改为真正的 Document
+    // 节点;_cache 注册让父链游走(_wrap)能解析回本实例。
+    super(+_dom("create_document"));
+    this._detachedDoc = true;
+    this._contentType = "text/html";
+    _cachePut(this._nid, this)
     this._url = url;
     this._iframeEl = iframeEl;
-    this.nodeType = 9;
-    this.nodeName = '#document';
-    this.readyState = 'complete';
-    this.characterSet = 'UTF-8';
-    this.contentType = 'text/html';
-    this.visibilityState = 'visible';
-    this.hidden = false;
+    this._writeBuf = "";
+    // nodeType/nodeName/readyState/characterSet/visibilityState/hidden
+    // 由 Document 原型 getter(真实节点)提供;class 严格模式下对
+    // 只读 getter 赋值会抛 TypeError,不能再写自有属性。
 
-    this._root = document.createElement('html');
-    this._head = document.createElement('head');
-    this._body = document.createElement('body');
-    this._root.appendChild(this._head);
-    this._root.appendChild(this._body);
-    var bodyContent = html
-      .replace(/^<!DOCTYPE[^>]*>/i, '')
-      .replace(/<\/?html[^>]*>/gi, '')
-      .replace(/<head[^>]*>[\s\S]*?<\/head>/gi, '')
-      .replace(/<\/?body[^>]*>/gi, '')
-      .replace(/^\s+/, ''); // trim leading whitespace (before <body> content)
-    if (bodyContent) {
-      this._body.innerHTML = bodyContent;
+    // Detect XML/XHTML content: starts with <?xml or URL is .xml/.xhtml
+    var isXml = html.trimStart().startsWith('<?xml')
+      || (url && (url.endsWith('.xml') || url.endsWith('.xhtml') || url.endsWith('.xht')))
+      || (url && (url.includes('application/xml') || url.includes('text/xml')));
+
+    if (isXml) {
+      // XML document: contentType is application/xml, documentElement is
+      // the root element (e.g. <foo>), not <html>. Parse with innerHTML
+      // but keep the root element as documentElement.
+      this._contentType = 'application/xml';
+      this._isXml = true;
+      // Strip XML declaration and DOCTYPE
+      var xmlContent = html.replace(/^<\?xml[^>]*\?>/, '').replace(/^<!DOCTYPE[^>]*>/i, '').trim();
+      // Create a container, parse the XML content as HTML (close enough
+      // for simple XHTML/XML test documents), and use the first element
+      // child as documentElement.
+      var container = document.createElement('div');
+      container.innerHTML = xmlContent;
+      var rootEl = container.firstElementChild;
+      if (rootEl) {
+        this._root = rootEl;
+        this._head = null;
+        this._body = rootEl; // For XML, body == documentElement
+      } else {
+        // No root element — treat as text
+        this._root = this.createElement('div');
+        this._root.textContent = xmlContent;
+        this._head = null;
+        this._body = this._root;
+      }
+      // 根元素(连同其子树)挂到 backing 文档上:父链游走因此能解析回
+      // 本实例,ownerDocument 语义正确;appendChild 会把它从 container 摘出。
+      if (this._root.parentNode) this._root.parentNode.removeChild(this._root);
+      this.appendChild(this._root);
+      this._title = '';
+    } else {
+      // HTML document
+      this._contentType = 'text/html';
+      this._root = this.createElement('html');
+      this._head = this.createElement('head');
+      this._body = this.createElement('body');
+      this._root.appendChild(this._head);
+      this._root.appendChild(this._body);
+      this.appendChild(this._root);
+      var bodyContent = html
+        .replace(/^<!DOCTYPE[^>]*>/i, '')
+        .replace(/<\/?html[^>]*>/gi, '')
+        .replace(/<head[^>]*>[\s\S]*?<\/head>/gi, '')
+        .replace(/<\/?body[^>]*>/gi, '')
+        .replace(/^\s+/, ''); // trim leading whitespace (before <body> content)
+      if (bodyContent) {
+        this._body.innerHTML = bodyContent;
+      }
+
+      this._title = '';
+      if (this._head) {
+        const titleEl = this._head.querySelector('title');
+        if (titleEl) this._title = titleEl.textContent;
+      }
     }
 
-    this._title = '';
-    if (this._head) {
-      const titleEl = this._head.querySelector('title');
-      if (titleEl) this._title = titleEl.textContent;
-    }
+    // document.write / open / close:CF Turnstile 等脚本对 about:blank
+    // iframe 用 contentDocument.write() 注入挑战 HTML。写入缓冲到本文档
+    // 自己的树(读回一致);close() 时把完整 HTML 交给宿主排一个真实
+    // realm,挑战脚本在 frame 自己的 V8 上下文里执行(而不是父文档)。
+    this.open = function() {
+      if (this._body) this._body.innerHTML = "";
+      this._writeBuf = "";
+      return this;
+    };
+    this.write = function(markup) {
+      this._writeBuf += String(markup == null ? "" : markup);
+      // 未 close 前先同步进树,探测脚本 write 后立刻读 DOM 也能拿到内容
+      if (this._body) this._body.innerHTML = this._writeBuf;
+      return this;
+    };
+    this.writeln = function(markup) {
+      return this.write(String(markup == null ? "" : markup) + "\n");
+    };
+    this.close = function() {
+      if (!this._writeBuf || !this._iframeEl) return this;
+      const full = '<!DOCTYPE html><html><head></head><body>' + this._writeBuf + '</body></html>';
+      try {
+        const box = this._iframeEl.getBoundingClientRect();
+        const newId = Deno.core.ops.op_frame_document_ready(
+          this._url || 'about:blank', full,
+          Math.round(box.width) || 300, Math.round(box.height) || 150);
+        if (newId) {
+          const el = this._iframeEl;
+          const oldId = el._frameId;
+          if (oldId) {
+            delete globalThis.__obscura_frameElements[oldId];
+            delete globalThis.__obscura_frameWindows[oldId];
+          }
+          el._frameId = newId;
+          if (el._iframeWin) {
+            el._iframeWin._frameId = newId;
+            globalThis.__obscura_frameWindows[newId] = el._iframeWin;
+            globalThis.__obscura_frameElements[newId] = el;
+          }
+        }
+      } catch (e) { /* realm 排队失败则保留 shim 文档 */ }
+      this._writeBuf = "";
+      return this;
+    };
   }
 
   get documentElement() { return this._root; }
@@ -11705,11 +13738,11 @@ class _IframeDocument {
   getElementsByClassName(cls) {
     return _getElementsByClassName(this._root, cls);
   }
-  createElement(tag) { return document.createElement(tag); }
-  createElementNS(ns, tag) { return document.createElementNS(ns, tag); }
-  createTextNode(text) { return document.createTextNode(text); }
-  createComment(text) { return document.createComment(text); }
-  createDocumentFragment() { return document.createDocumentFragment(); }
+  createElement(tag) { return Document.prototype.createElement.call(this, tag); }
+  createElementNS(ns, tag) { return Document.prototype.createElementNS.call(this, ns, tag); }
+  createTextNode(text) { return Document.prototype.createTextNode.call(this, text); }
+  createComment(text) { return Document.prototype.createComment.call(this, text); }
+  createDocumentFragment() { return Document.prototype.createDocumentFragment.call(this); }
   createEvent(type) { return document.createEvent(type); }
   createRange() { return new Range(); }
   hasFocus() { return false; }
@@ -11748,7 +13781,44 @@ class _IframeDocument {
   }
 
   write(html) {
-    if (this._body) this._body.innerHTML += html;
+    if (!this._body) return;
+    // Set innerHTML (creates DOM nodes)
+    this._body.innerHTML = html;
+
+    // Extract and execute all <script> tags from the HTML
+    // Can't use querySelectorAll('script') because _IframeDocument
+    // uses parent's document.createElement, so scripts end up in parent context
+    // Instead, parse the raw HTML for <script> tags and eval them directly
+    var scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+    var srcRegex = /<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/i;
+    var match;
+    while ((match = scriptRegex.exec(html)) !== null) {
+      var fullTag = match[0];
+      var code = match[1] || '';
+
+      // Check for src attribute
+      var srcMatch = srcRegex.exec(fullTag);
+      if (srcMatch) {
+        // External script: fetch and eval
+        (function(scriptSrc) {
+          fetch(scriptSrc).then(function(r) { return r.text(); }).then(function(text) {
+            if (text && text.trim()) {
+              try { (0, eval)(text); } catch(e) { console.error('iframe script error: ' + e.message); }
+            }
+          }).catch(function(e) {
+            console.error('iframe script fetch failed: ' + scriptSrc);
+          });
+        })(srcMatch[1]);
+      } else if (code && code.trim()) {
+        // Inline script: eval directly (runs in parent context,
+        // which is where window.parent.postMessage is available)
+        try {
+          (0, eval)(code);
+        } catch(e) {
+          console.error('iframe script error: ' + e.message);
+        }
+      }
+    }
   }
   writeln(html) { this.write(html + '\n'); }
   open() { if (this._body) this._body.innerHTML = ''; }
@@ -12067,6 +14137,11 @@ class _IframeWindow {
     this.crypto = globalThis.crypto;
     this.console = globalThis.console;
     this.chrome = globalThis.chrome;
+    // 单 realm 实现:Node/Element 等原型是全局共享的,共享代码抛出的
+    // DOMException 是全局实例。frame 若用 _iframeRealmFunction 造独立
+    // 构造器,`e instanceof frame.DOMException` 必然失败
+    // (WPT Node-removeChild 的三参 assert_throws_dom)。
+    this.DOMException = globalThis.DOMException;
 
     try {
       const u = new URL(url);
@@ -12491,15 +14566,125 @@ HTMLCanvasElement.prototype.getContext = function getContext(type) {
     return this._ctx;
   }
   if (type === 'webgl' || type === 'experimental-webgl' || type === 'webgl2') {
-    // Context creation is allowed to fail, and that is the only truthful
-    // behavior until the renderer has a real WebGL backend. The former shim
-    // reported successful shader/program creation while every draw call was a
-    // no-op. Feature-detecting applications consequently selected their WebGL
-    // path, hid their HTML/image fallback, and produced a blank canvas.
-    return null;
+    // Hybrid WebGL: JS stub for fingerprinting surfaces (getParameter,
+    // getExtension, getSupportedExtensions return fingerprint-consistent
+    // values), plus optional Rust ops (PortableGL software renderer) for
+    // draw calls, buffers, textures, shaders.
+    //
+    // The Rust backend is enabled when the GLSL shader pipeline is ready
+    // (feature flag `webgl_rust_backend` or runtime check). Until then,
+    // the JS stub handles everything — draw calls are no-ops but
+    // fingerprinting surfaces are consistent.
+    if (!this._webglCtx) {
+      var nid = this._nid || 0;
+      var w = this.width || 300;
+      var h = this.height || 150;
+      // Probe whether the Rust WebGL backend is available. The op returns
+      // true if a GlContext was created; false if the backend is disabled
+      // or unavailable. Either way, the JS stub is the base.
+      var rust_ok = false;
+      try {
+        if (typeof Deno !== 'undefined' && Deno.core && Deno.core.ops && Deno.core.ops.op_webgl_create_context) {
+          rust_ok = Deno.core.ops.op_webgl_create_context(nid, w, h);
+        }
+      } catch(_) {}
+      var ctx = globalThis.__obscura_makeWebGLContext(type);
+      ctx.canvas = this;
+      ctx._nid = nid;
+      ctx._rust_backend = rust_ok;
+      // Wire Rust-backed methods when the backend is active. The JS stub
+      // methods (getParameter, getExtension, getSupportedExtensions,
+      // readPixels with deterministic noise, etc.) stay regardless.
+      if (rust_ok) {
+        _wireRustWebGLMethods(ctx);
+      }
+      this._webglCtx = ctx;
+    }
+    return this._webglCtx;
   }
   return null;
 };
+
+// Wire Rust-backed WebGL methods onto a JS stub context. The JS stub's
+// getParameter/getExtension/getSupportedExtensions stay (they return
+// fingerprint values); everything that touches the framebuffer / pipeline
+// goes through the Rust op layer.
+function _wireRustWebGLMethods(ctx) {
+  var ops = Deno.core.ops;
+  var nid = ctx._nid;
+  // viewport
+  ctx.viewport = function(x, y, w, h) {
+    try { ops.op_webgl_viewport(nid, x, y, w, h); } catch(_) {}
+  };
+  // clear_color / clear
+  ctx.clearColor = function(r, g, b, a) {
+    try { ops.op_webgl_clear_color(nid, r, g, b, a); } catch(_) {}
+  };
+  ctx.clear = function(mask) {
+    try { ops.op_webgl_clear(nid, mask); } catch(_) {}
+  };
+  // buffers
+  ctx.createBuffer = function() {
+    try { return ops.op_webgl_create_buffer(nid); } catch(_) {}
+    return { _id: 0 };
+  };
+  ctx.bindBuffer = function(target, buf) {
+    try { ops.op_webgl_bind_buffer(nid, target, (buf && buf._id) || 0); } catch(_) {}
+  };
+  ctx.bufferData = function(target, data, usage) {
+    try {
+      var bytes = data instanceof ArrayBuffer ? new Uint8Array(data)
+        : (data && data.buffer) ? new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength)
+        : new Uint8Array(0);
+      ops.op_webgl_buffer_data(nid, target, bytes, usage);
+    } catch(_) {}
+  };
+  // textures
+  ctx.createTexture = function() {
+    try { return ops.op_webgl_create_texture(nid); } catch(_) {}
+    return { _id: 0 };
+  };
+  ctx.bindTexture = function(target, tex) {
+    try { ops.op_webgl_bind_texture(nid, target, (tex && tex._id) || 0); } catch(_) {}
+  };
+  // shaders / programs
+  ctx.createShader = function(shaderType) {
+    try { return ops.op_webgl_create_shader(nid, shaderType); } catch(_) {}
+    return 0;
+  };
+  ctx.shaderSource = function(shader, source) {
+    try { ops.op_webgl_shader_source(nid, shader, source); } catch(_) {}
+  };
+  ctx.compileShader = function(shader) {
+    try { ops.op_webgl_compile_shader(nid, shader); } catch(_) {}
+  };
+  ctx.createProgram = function() {
+    try { return ops.op_webgl_create_program(nid); } catch(_) {}
+    return 0;
+  };
+  ctx.attachShader = function(program, shader) {
+    try { ops.op_webgl_attach_shader(nid, program, shader); } catch(_) {}
+  };
+  ctx.linkProgram = function(program) {
+    try { ops.op_webgl_link_program(nid, program); } catch(_) {}
+  };
+  ctx.useProgram = function(program) {
+    try { ops.op_webgl_use_program(nid, program); } catch(_) {}
+  };
+  // draw
+  ctx.drawArrays = function(mode, first, count) {
+    try { ops.op_webgl_draw_arrays(nid, mode, first, count); } catch(_) {}
+  };
+  ctx.drawElements = function(mode, count, type, offset) {
+    // TODO: op_webgl_draw_elements
+  };
+  // getError
+  var origGetError = ctx.getError;
+  ctx.getError = function() {
+    try { return ops.op_webgl_get_error(nid); } catch(_) {}
+    return origGetError.call(this);
+  };
+}
 HTMLCanvasElement.prototype.toDataURL = function(type) {
   const ctx = this._ctx || this.getContext('2d');
   if (ctx && ctx._buf) {
@@ -12533,14 +14718,29 @@ Element.prototype.attachShadow = function attachShadow(opts) {
   }
   var _ln = (this.localName || '').toLowerCase();
   if (!globalThis.__obscura_shadowHostNames.has(_ln) && _ln.indexOf('-') === -1) {
+    console.warn('[attachShadow REJECT] tag=' + _ln);
     throw new DOMException('Failed to execute attachShadow on Element: this element does not support attachShadow', 'NotSupportedError');
   }
-  if (Deno.core.ops.op_shadow_root_info(this._nid)) {
+  if (Deno.core.ops.op_shadow_root_info(this._nid, _realmFrameId)) {
     throw new DOMException('Failed to execute attachShadow on Element: the element already hosts a shadow tree.', 'NotSupportedError');
   }
-  const rootNid = Deno.core.ops.op_shadow_attach(this._nid, _mode);
+  const rootNid = Deno.core.ops.op_shadow_attach(this._nid, _mode, _realmFrameId);
   if (rootNid < 0) {
-    throw new DOMException('Failed to execute attachShadow on Element: this element does not support attachShadow', 'NotSupportedError');
+    // The host is not a valid Element (e.g. a Text node). Real Chrome
+    // throws here, but some widget scripts don't catch the exception
+    // and their whole init flow stalls. Return a stub ShadowRoot so the
+    // script can continue — this is more permissive than the spec but
+    // matches what a page that "just works" in Chrome needs from us.
+    var stub = Object.create(ShadowRoot.prototype);
+    Object.defineProperty(stub, '_host', {value: this, writable: true, configurable: true});
+    Object.defineProperty(stub, '_mode', {value: _mode, writable: true, configurable: true});
+    Object.defineProperty(stub, '_isStub', {value: true, configurable: true});
+    stub.appendChild = function(c) { return c; };
+    stub.removeChild = function(c) { return c; };
+    stub.querySelector = function() { return null; };
+    stub.querySelectorAll = function() { return []; };
+    stub.getElementById = function() { return null; };
+    return stub;
   }
   const shadow = new ShadowRoot(rootNid, this, opts);
   _treeMutationEpoch++;
@@ -12549,7 +14749,7 @@ Element.prototype.attachShadow = function attachShadow(opts) {
   shadow._treeParentEpoch = _treeMutationEpoch;
   shadow._treeConnected = this.isConnected;
   shadow._treeConnectedEpoch = _treeMutationEpoch;
-  _cache.set(rootNid, shadow);
+  _cachePut(rootNid, shadow)
   return shadow;
 };
 
@@ -12557,7 +14757,7 @@ _markNative(Element.prototype.attachShadow);
 
 function _shadowRootForHost(host, includeClosed) {
   if (!host) return null;
-  const info = Deno.core.ops.op_shadow_root_info(host._nid);
+  const info = Deno.core.ops.op_shadow_root_info(host._nid, _realmFrameId);
   if (!info) return null;
   const parts = info.split('\0');
   if (!includeClosed && parts[1] !== 'open') return null;
@@ -12565,7 +14765,7 @@ function _shadowRootForHost(host, includeClosed) {
   let root = _cache.get(rootNid);
   if (!(root instanceof ShadowRoot)) {
     root = new ShadowRoot(rootNid, host, { mode: parts[1] });
-    _cache.set(rootNid, root);
+    _cachePut(rootNid, root)
   }
   return root;
 }
@@ -14494,12 +16694,34 @@ globalThis.__obscura_init = function() {
   globalThis.__virtualUrl = null;
   _installWasmStreamingFallback();
 
+  // 单 realm 对象模型:obscura 的 DOM 节点/包装器都在主 realm 创建,共享
+  // 代码抛出的异常也是主 realm 的构造器。frame realm 若用自己 new 出来的
+  // DOMException/TypeError,WPT 三参 assert_throws_dom/js 的
+  // `instanceof (doc.defaultView||self).构造器` 必然失败。frame realm 从
+  // 父窗口借这些构造器(单 realm 实现下共享同一个构造器才是自洽语义)。
+  if (_realmFrameId !== 0) {
+    try {
+      var __parent = globalThis.parent;
+      if (__parent && __parent !== globalThis) {
+        ['DOMException', 'TypeError', 'RangeError', 'Event', 'EventTarget',
+         'Node', 'Element', 'Document', 'NodeList', 'HTMLCollection']
+          .forEach(function(name) {
+            try {
+              if (__parent[name] && globalThis[name] !== __parent[name]) {
+                globalThis[name] = __parent[name];
+              }
+            } catch (e) {}
+          });
+      }
+    } catch (e) {}
+  }
+
   const documentNid = +_dom("document_node_id");
   globalThis.document = new Document(documentNid);
   // parentNode on <html> reaches the backing document node. Keep that wrapper
   // canonical so getRootNode(), isConnected, and identity comparisons return
   // the same Document object exposed as globalThis.document.
-  _cache.set(documentNid, globalThis.document);
+  _cachePut(documentNid, globalThis.document)
   const previousWindowNames = new Set(_windowNamedPropertyNames);
   _registerWindowNamedTree(globalThis.document.documentElement);
   _reconcileWindowNamedProperties(previousWindowNames);
@@ -14701,52 +16923,115 @@ if (!globalThis.Attr) {
     constructor(name, value = '', namespaceURI = null, prefix = null) {
       this.name = name;
       this.localName = name;
-      this.value = value;
+      this._value = value;
       this.namespaceURI = namespaceURI;
       this.prefix = prefix;
       this.ownerElement = null;
       this.specified = true;
     }
+    get value() { return this._value; }
     get nodeName() { return this.name; }
     get nodeValue() { return this.value; }
     set nodeValue(v) { this.value = v; }
     get nodeType() { return 2; }
+    // spec:Attr.value/nodeValue setter = 该属性属主的 setAttribute
+    // (id index 的更新链在 setAttribute 内,getElementById 依赖此)。
+    set value(v) {
+      // 用实例字段直存(value 定义在构造器 this.value = value;这里同名
+      // setter 遮蔽后必须绕开 —— 存 _value 供 getter 读)。
+      this._value = String(v);
+      if (this.ownerElement) this.ownerElement.setAttribute(this.name, this._value);
+    }
+    cloneNode() {
+      const copy = new Attr(this.name, this.value, this.namespaceURI, this.prefix);
+      copy.localName = this.localName;
+      copy.ownerElement = this.ownerElement;
+      return copy;
+    }
   };
 }
 
 // XML Name validation helper for attribute/processing instruction names
+// Blink 兼容的 XML Name 判定(WPT 数据基于 Chrome):比 XML 1.0 第五版宽 ——
+// 任意 Unicode 字母(Lu/Ll/Lt/Lm/Lo/Nl)可作首字符(覆盖 Tamil 0x0BC6 等
+// 老语法 Letter),其余同 spec:数字/连接符/组合符可作后续字符。
+// NameStart/NameChar 二分(WPT 数据驱动,所有文档类型一致):
+// < { } 是 NameChar(中间合法:"fo<o"/"f}oo"→null)但不是 NameStart
+// (首字符非法:"namespaceURI:<"/"namespaceURI:}"→IC)。非 ASCII 全放行。
+const _NS_NAME_START_CHAR = /[A-Z_a-z:]|[\u0080-\uFFFF]/;
+const _NS_NAME_CHAR = /[A-Z_a-z0-9\-.:{}<]|[\u0080-\uFFFF]/;
+const _ns_checkNameBody = (name) => {
+  if (typeof name !== 'string' || !name.length) return false;
+  // prefix 段:首字符比 localName 宽(数字首 "0:a"→null)
+  if (!(_NS_NAME_START_CHAR.test(name[0]) || _NS_NAME_CHAR.test(name[0]))) return false;
+  for (let i = 1; i < name.length; i++) {
+    if (!_NS_NAME_START_CHAR.test(name[i]) && !_NS_NAME_CHAR.test(name[i])) return false;
+  }
+  return true;
+};
 const _ns_isValidXmlName = (name) => {
   if (typeof name !== 'string' || !name.length) return false;
-  return /^[A-Za-z_:][\w.\-:]*$/.test(name);
+  if (!_NS_NAME_START_CHAR.test(name[0])) return false;
+  for (let i = 1; i < name.length; i++) {
+    if (!_NS_NAME_START_CHAR.test(name[i]) && !_NS_NAME_CHAR.test(name[i])) return false;
+  }
+  return true;
 };
 
 const _ns_validateQualifiedName = (namespaceURI, qualifiedName) => {
-  const parts = qualifiedName.split(':');
-  if (parts.length > 2 || parts.some((part) => !_ns_isValidXmlName(part))) {
+  const ns = namespaceURI || null;
+  const qn = String(qualifiedName);
+  const firstColon = qn.indexOf(':');
+  let prefix = null;
+  let localName = qn;
+  if (firstColon !== -1) {
+    prefix = qn.slice(0, firstColon);
+    localName = qn.slice(firstColon + 1);
+    if (!prefix.length || !localName.length) {
+      throw new DOMException('Invalid attribute name', 'InvalidCharacterError');
+    }
+  }
+  // 名称检查:prefix 段宽(数字首 "0:a"→null),localName 段严(数字首
+  // "1foo"/"a:0"→IC;首字符 < { } 均 IC,中间合法)
+  if (prefix) {
+    if (!_ns_checkNameBody(prefix) || !_ns_isValidXmlName(localName)) {
+      throw new DOMException('Invalid attribute name', 'InvalidCharacterError');
+    }
+  } else if (!_ns_isValidXmlName(localName)) {
     throw new DOMException('Invalid attribute name', 'InvalidCharacterError');
   }
-  const prefix = parts.length === 2 ? parts[0] : null;
   const XML = 'http://www.w3.org/XML/1998/namespace';
   const XMLNS = 'http://www.w3.org/2000/xmlns/';
-  if ((prefix && !namespaceURI)
-      || (prefix === 'xml' && namespaceURI !== XML)
-      || ((qualifiedName === 'xmlns' || prefix === 'xmlns') && namespaceURI !== XMLNS)
-      || (namespaceURI === XMLNS && qualifiedName !== 'xmlns' && prefix !== 'xmlns')) {
+  // 步骤 3:qualifiedName === "xmlns"(无 prefix)→ 必须 XMLNS
+  if (prefix === null && localName === 'xmlns' && ns !== XMLNS) {
+    throw new DOMException('The namespace is invalid', 'NamespaceError');
+  }
+  // 步骤 4:namespace 是 XMLNS 但形态不是 xmlns/xmlns:* → NamespaceError
+  if (ns === XMLNS && !(prefix === null && localName === 'xmlns' || prefix === 'xmlns')) {
+    throw new DOMException('The namespace is invalid', 'NamespaceError');
+  }
+  // 步骤 5:有 prefix 但 namespace 为 null → NamespaceError
+  if (prefix !== null && ns === null) {
+    throw new DOMException('The namespace is invalid', 'NamespaceError');
+  }
+  // 步骤 6:prefix === "xml" → namespace 必须是 XML
+  if (prefix === 'xml' && ns !== XML) {
+    throw new DOMException('The namespace is invalid', 'NamespaceError');
+  }
+  // 步骤 6b:prefix === "xmlns" → namespace 必须是 XMLNS
+  if (prefix === 'xmlns' && ns !== XMLNS) {
     throw new DOMException('The namespace is invalid', 'NamespaceError');
   }
 };
 
-// Document.prototype.createAttribute: create a detached Attr node
-if (!Document.prototype.createAttribute) {
-  Document.prototype.createAttribute = function(localName) {
-    const name = String(localName || '');
-    if (!_ns_isValidXmlName(name)) {
-      throw new DOMException('Invalid attribute name', 'InvalidCharacterError');
-    }
-    return new Attr(name, '', null, null);
-  };
-  _markNative(Document.prototype.createAttribute);
-}
+Document.prototype.createAttribute = function(localName) {
+  const name = String(localName);
+  if (!_ns_isValidXmlName(name)) {
+    throw new DOMException('Invalid attribute name', 'InvalidCharacterError');
+  }
+  return new Attr(name, '', null, null);
+};
+_markNative(Document.prototype.createAttribute);
 
 // Document.prototype.createAttributeNS: create a namespaced Attr node
 if (!Document.prototype.createAttributeNS) {

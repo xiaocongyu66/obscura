@@ -1,0 +1,39 @@
+[package]
+name = "obscura-webgl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust software WebGL implementation for Obscura. Based on PortableGL with GLSL ES 1.0 compiler/interpreter."
+
+[lib]
+name = "obscura_webgl"
+path = "src/lib.rs"
+
+[features]
+default = ["abgr32", "d24s8"]
+
+# Pixel formats (choose one)
+abgr32 = []
+rgba32 = []
+argb32 = []
+bgra32 = []
+rgb565 = []
+bgr565 = []
+
+# Depth/stencil formats (choose one)
+d24s8 = []
+d16 = []
+no_depth = []
+
+# Optional features
+no_stencil = []
+unsafe_mode = []
+
+# GLSL ES 1.0 compiler + interpreter (needed for real WebGL)
+glsl = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+glsl = "7"

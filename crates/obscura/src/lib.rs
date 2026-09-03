@@ -30,3 +30,15 @@ pub use page::Page;
 // Request/response interception types (issue #306).
 pub use obscura_browser::{InterceptedRequest, InterceptResolution};
 pub use obscura_net::{RequestCallback, RequestInfo, ResourceType, Response, ResponseCallback};
+
+// Fingerprint + CDP hardening: exposed so callers (Go side, custom
+// integrations) can pre-generate an identity and pass it to a Page, or
+// inspect the JS that gets injected as `addScriptToEvaluateOnNewDocument`.
+pub use obscura_browser::{cdp_hardening, fingerprint};
+
+// Behavior simulation: human-like mouse/keyboard/scroll planners.
+pub use obscura_browser::behavior;
+
+// Proxy rotation: pool with round-robin / random strategies and sticky
+// sessions per host/session.
+pub use obscura_browser::proxy;

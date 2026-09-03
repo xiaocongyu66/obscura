@@ -437,6 +437,27 @@ impl StealthHttpClient {
         send_cookies: bool,
         store_cookies: bool,
     ) -> Result<Response, ObscuraNetError> {
+        self.send_single_for_request(method, url, headers, body, send_cookies, store_cookies, "", "")
+            .await
+    }
+
+    /// fetch/XHR 请求:emulation(Chrome145)默认带**导航级**头
+    /// (sec-fetch-mode: navigate / dest: document / site: none /
+    /// Accept: text/html...)。脚本化 fetch 带导航头是显眼 bot 特征
+    /// (CF 直接 403)。按 Fetch spec 覆盖为资源请求语义:`site` 为调用方
+    /// 按请求方 origin 与目标推导的 sec-fetch-site 值(同源 same-origin /
+    /// 跨源 cross-site / 无 origin none),`accept` 为 JS 侧指定的 Accept。
+    pub async fn send_single_for_request(
+        &self,
+        method: &str,
+        url: &Url,
+        headers: &HashMap<String, String>,
+        body: &str,
+        send_cookies: bool,
+        store_cookies: bool,
+        site: &str,
+        accept: &str,
+    ) -> Result<Response, ObscuraNetError> {
         if let Some(host) = url.host_str() {
             if crate::blocklist::is_blocked(host) {
                 tracing::debug!("Blocked tracker: {}", url);
@@ -457,6 +478,11 @@ impl StealthHttpClient {
 
         if send_cookies {
             let cookie_header = self.cookie_jar.get_cookie_header(url);
+            tracing::debug!(
+                "wreq send_single cookie for {}: {} bytes",
+                url.host_str().unwrap_or("?"),
+                cookie_header.len()
+            );
             if !cookie_header.is_empty() {
                 req = req.header("cookie", &cookie_header);
             }
@@ -467,6 +493,21 @@ impl StealthHttpClient {
         for (k, v) in headers.iter() {
             req = req.header(k.as_str(), v.as_str());
         }
+        // 资源请求语义:覆盖 emulation 的导航级默认。custom 显式给的值优先
+        // (先设默认,custom 追加同名时 wreq 以最后值为准)。
+        // Chrome 的头序(观测):accept → sec-fetch-site → sec-fetch-mode →
+        // sec-fetch-dest。CF 的指纹规则对头序敏感,顺序错误 = 非浏览器特征。
+        if !headers.keys().any(|k| k.eq_ignore_ascii_case("accept")) {
+            let accept_value = if accept.is_empty() { "*/*" } else { accept };
+            req = req.header("accept", accept_value);
+        }
+        if site.is_empty() {
+            req = req.header("sec-fetch-site", "same-origin");
+        } else {
+            req = req.header("sec-fetch-site", site);
+        }
+        req = req.header("sec-fetch-mode", "cors");
+        req = req.header("sec-fetch-dest", "empty");
         if !body.is_empty() {
             req = req.body(body.to_string());
         }
@@ -480,6 +521,11 @@ impl StealthHttpClient {
         if store_cookies {
             for val in resp.headers().get_all("set-cookie") {
                 if let Ok(s) = val.to_str() {
+                    tracing::debug!(
+                        "wreq set-cookie from {}: {}",
+                        url.host_str().unwrap_or("?"),
+                        s.split(';').next().unwrap_or("").to_string()
+                    );
                     self.cookie_jar.set_cookie(s, url);
                 }
             }

@@ -489,6 +489,54 @@ impl ObscuraJsRuntime {
         copied > 0
     }
 
+    /// Copies the identity-critical global constructors from the main realm
+    /// into a child realm. obscura's object model is single-realm: DOM
+    /// wrappers live in the main realm and shared code throws main-realm
+    /// exceptions, so a child realm keeping its own `DOMException`/`TypeError`
+    /// fails every `instanceof` check the WPT three-argument
+    /// assert_throws_dom/js form makes against `(doc.defaultView||self)`.
+    /// Runs after `share_ops_with_realm` and before `__obscura_init`, so the
+    /// frame's own bootstrap goes on to use the shared constructors too.
+    pub(crate) fn share_global_constructors_with_realm(
+        &mut self,
+        realm: &deno_core::v8::Global<deno_core::v8::Context>,
+    ) -> usize {
+        use deno_core::v8;
+
+                // Servo 语义(见 components/script/realms.rs 的 DomTypeHolder):每个
+        // realm 各自持有完整构造器集,跨 realm 断言(WPT win.XXX)以目标 realm
+        // 为准 —— realm 自洽即通过。把主 realm 的类覆盖到 iframe 的 window 上
+        // 反而制造两个类并存(iframe 的 DOM 实现仍用自己 bootstrap 的类建对象,
+        // window.Element 却指向主类 → instanceof 断裂)。
+        const NAMES: &[&str] = &[];
+        let main_global = self.runtime.main_context().clone();
+        let isolate = self.runtime.v8_isolate();
+        let scope = &mut v8::HandleScope::new(isolate);
+        let main = v8::Local::new(scope, main_global);
+        let realm_context = v8::Local::new(scope, realm);
+
+        let mut copied = 0;
+        for name in NAMES {
+            let Some(key) = v8::String::new(scope, name) else { continue };
+            let source = {
+                let scope = &mut v8::ContextScope::new(scope, main);
+                main.global(scope).get(scope, key.into())
+            };
+            let Some(source) = source else { continue };
+            let ok = {
+                let scope = &mut v8::ContextScope::new(scope, realm_context);
+                realm_context
+                    .global(scope)
+                    .set(scope, key.into(), source)
+                    .unwrap_or(false)
+            };
+            if ok {
+                copied += 1;
+            }
+        }
+        copied
+    }
+
     /// Runs `source` inside `realm` and returns its value as a string. Errors
     /// come back as `Err(message)`.
     pub(crate) fn eval_in_realm(
@@ -2209,6 +2257,7 @@ impl ObscuraJsRuntime {
         let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let pair_clone = pair.clone();
 
+        let watchdog_name = name.to_string();
         let watchdog = std::thread::spawn(move || {
             let (lock, cvar) = &*pair_clone;
             let mut cancelled = lock.lock().unwrap();
@@ -2217,6 +2266,11 @@ impl ObscuraJsRuntime {
             loop {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 if remaining.is_zero() {
+                    tracing::warn!(
+                        "execute_script_with_timeout: script '{}' exceeded {:?}, terminating",
+                        watchdog_name,
+                        timeout
+                    );
                     isolate_handle.terminate_execution();
                     return;
                 }

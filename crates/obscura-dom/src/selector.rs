@@ -107,6 +107,16 @@ pub enum PseudoClass {
     Enabled,
     Disabled,
     Checked,
+    /// `:target`:URL fragment 指向的元素。querySelector 里解析必须成功,
+    /// 匹配层按 element id == document URL fragment 判定(无 fragment 时不匹配)。
+    Target,
+    /// `:lang(...)`:语言匹配。解析必须成功;匹配层按 lang/xml:lang 属性
+    /// 前缀匹配(WPT 断言继承行为——element 自身没有时父链向上找)。
+    Lang(String),
+    /// `:valid` / `:invalid`:约束校验状态。匹配层按表单控件属性判定
+    /// (required 空、select 选中 option 空),fieldset/form 从内部控件传播。
+    Valid,
+    Invalid,
     /// `:link` / `:any-link`: an `<a>`/`<area>` with an `href`. Extremely
     /// common (`a:link { color: ... }` is the standard way sites set their
     /// base link color), so treating it as unsupported silently drops the
@@ -155,8 +165,16 @@ impl ToCss for PseudoClass {
             PseudoClass::Enabled => dest.write_str(":enabled"),
             PseudoClass::Disabled => dest.write_str(":disabled"),
             PseudoClass::Checked => dest.write_str(":checked"),
+            PseudoClass::Valid => dest.write_str(":valid"),
+            PseudoClass::Invalid => dest.write_str(":invalid"),
             PseudoClass::Link => dest.write_str(":link"),
             PseudoClass::Visited => dest.write_str(":visited"),
+            PseudoClass::Target => dest.write_str(":target"),
+            PseudoClass::Lang(ref lang) => {
+                dest.write_str(":lang(")?;
+                dest.write_str(lang)?;
+                dest.write_str(")")
+            }
         }
     }
 }
@@ -165,10 +183,18 @@ impl ToCss for PseudoClass {
 pub enum PseudoElement {
     Before,
     After,
+    /// `:first-line` / `::first-line`。querySelector 里合法、永不匹配任何
+    /// 元素(WPT 断言 length=0),解析必须成功。
+    FirstLine,
+    FirstLetter,
+    /// `::selection` 同理:解析合法、匹配为空。
+    Selection,
 }
 
 impl parser::PseudoElement for PseudoElement {
     type Impl = ObscuraSelector;
+    // ::before/::after 之后不能再跟其它伪元素选择器组合
+    fn valid_after_slotted(&self) -> bool { true }
 }
 
 impl ToCss for PseudoElement {
@@ -176,6 +202,9 @@ impl ToCss for PseudoElement {
         match self {
             PseudoElement::Before => dest.write_str("::before"),
             PseudoElement::After => dest.write_str("::after"),
+            PseudoElement::FirstLine => dest.write_str("::first-line"),
+            PseudoElement::FirstLetter => dest.write_str("::first-letter"),
+            PseudoElement::Selection => dest.write_str("::selection"),
         }
     }
 }
@@ -234,8 +263,11 @@ impl<'i> parser::Parser<'i> for ObscuraSelectorParser {
             "enabled" => Ok(PseudoClass::Enabled),
             "disabled" => Ok(PseudoClass::Disabled),
             "checked" => Ok(PseudoClass::Checked),
+            "valid" => Ok(PseudoClass::Valid),
+            "invalid" => Ok(PseudoClass::Invalid),
             "link" | "any-link" => Ok(PseudoClass::Link),
             "visited" => Ok(PseudoClass::Visited),
+            "target" => Ok(PseudoClass::Target),
             _ => Err(cssparser::ParseError {
                 kind: cssparser::ParseErrorKind::Custom(
                     SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
@@ -244,7 +276,51 @@ impl<'i> parser::Parser<'i> for ObscuraSelectorParser {
             }),
         }
     }
+
+    // ::selection 等非树结构伪元素:querySelector 里解析必须成功,匹配为空。
+    // (first-line/first-letter 走 selectors crate 内建的 CSS2 单冒号路径;
+    // selection 要在 parse_pseudo_element 钩子里放行。)
+    fn parse_pseudo_element(
+        &self,
+        location: cssparser::SourceLocation,
+        name: CowRcStr<'i>,
+    ) -> Result<PseudoElement, cssparser::ParseError<'i, Self::Error>> {
+        match name.to_lowercase().as_str() {
+            "selection" => Ok(PseudoElement::Selection),
+            "first-line" => Ok(PseudoElement::FirstLine),
+            "first-letter" => Ok(PseudoElement::FirstLetter),
+            "before" => Ok(PseudoElement::Before),
+            "after" => Ok(PseudoElement::After),
+            _ => Err(cssparser::ParseError {
+                kind: cssparser::ParseErrorKind::Custom(
+                    SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
+                ),
+                location,
+            }),
+        }
+    }
+
+    // :lang(...) 带参伪类(selectors 0.26 的 functional 钩子):捕获语言标签。
+    // 匹配层在 match_non_ts_pseudo_class 的 Lang 分支做父链前缀匹配。
+    fn parse_non_ts_functional_pseudo_class<'t>(
+        &self,
+        name: cssparser::CowRcStr<'i>,
+        parser: &mut cssparser::Parser<'i, 't>,
+        _after_part: bool,
+    ) -> Result<PseudoClass, cssparser::ParseError<'i, Self::Error>> {
+        if name.eq_ignore_ascii_case("lang") {
+            let lang = parser.expect_ident_or_string()?.as_ref().to_owned();
+            return Ok(PseudoClass::Lang(lang));
+        }
+        Err(cssparser::ParseError {
+            kind: cssparser::ParseErrorKind::Custom(
+                SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
+            ),
+            location: cssparser::SourceLocation { line: 0, column: 0 },
+        })
+    }
 }
+
 
 #[derive(Clone, Copy)]
 pub struct DomElement<'a> {
@@ -489,6 +565,56 @@ impl<'a> Element for DomElement<'a> {
         match pc {
             PseudoClass::Link => self.is_link(),
             PseudoClass::Visited => false,
+            // :target:元素 id == 文档 URL 的 fragment。无 fragment 或无 id
+            // 都不匹配(真实浏览器语义)。
+            // :target:元素 id == 文档 URL 的 fragment,且元素必须在当前
+            // 文档树里(Detached/Fragment 里的克隆不匹配——真实浏览器语义,
+            // WPT 断言 length=0)。
+            PseudoClass::Target => {
+                let doc_url = self.tree.document_url();
+                let frag = doc_url.rsplit_once('#').map(|(_, f)| f.to_string()).unwrap_or_default();
+                !frag.is_empty()
+                    && self
+                        .tree
+                        .with_node(self.node_id, |n| {
+                            n.connected
+                                && n.get_attribute("id")
+                                    .map(|id| id == frag)
+                                    .unwrap_or(false)
+                        })
+                        .unwrap_or(false)
+            }
+            // :lang:元素(自身 lang 属性)或祖先的语言标签前缀匹配,
+            // "-" 分隔的主子标签规则(RFC 4647 basic filtering)。继承沿
+            // 父链向上(WPT 断言 inherited 行为)。
+            PseudoClass::Lang(ref want) => {
+                let mut cur = Some(self.node_id);
+                while let Some(nid) = cur {
+                    let step = self.tree.with_node(nid, |n| {
+                        let lang = n
+                            .attrs()
+                            .and_then(|attrs| {
+                                attrs
+                                    .iter()
+                                    .find(|a| {
+                                        a.qualified_name_eq("lang")
+                                            || a.qualified_name_eq("xml:lang")
+                                    })
+                                    .map(|a| a.value.as_str().to_string())
+                            });
+                        (lang, n.parent)
+                    });
+                    let Some((lang, parent_id)) = step else { return false };
+                    if let Some(lang) = lang {
+                        let want_l = want.to_lowercase();
+                        let lang_l = lang.to_lowercase();
+                        return lang_l == want_l
+                            || lang_l.starts_with(&(want_l.clone() + "-"));
+                    }
+                    cur = parent_id;
+                }
+                false
+            }
             // :enabled/:disabled/:checked reflect real, static DOM state (the
             // disabled/checked attributes), not live user interaction, so
             // they resolve the same way against a static snapshot as they
@@ -501,6 +627,151 @@ impl<'a> Element for DomElement<'a> {
             PseudoClass::Disabled => self.is_form_control() && self.has_boolean_attr("disabled"),
             PseudoClass::Checked => {
                 self.has_boolean_attr("checked") || self.has_boolean_attr("selected")
+            }
+            PseudoClass::Valid | PseudoClass::Invalid => {
+                let want_invalid = matches!(pc, PseudoClass::Invalid);
+                let tag = self
+                    .tree
+                    .with_node(self.node_id, |n| {
+                        n.as_element().map(|q| q.local.to_string()).unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                let tag = tag.to_ascii_lowercase();
+                let form_tags = ["input", "select", "textarea", "button", "fieldset", "form", "output", "object"];
+                if !form_tags.contains(&tag.as_str()) {
+                    return false;
+                }
+                let disabled = self.has_boolean_attr("disabled");
+                let is_candidate = matches!(tag.as_str(), "input" | "select" | "textarea");
+                let mut invalid = false;
+                if !disabled && is_candidate {
+                    let get = |name: &str| -> String {
+                        self.tree
+                            .with_node(self.node_id, |n| {
+                                n.get_attribute(name).unwrap_or("").to_string()
+                            })
+                            .unwrap_or_default()
+                    };
+                    let required = self.has_boolean_attr("required");
+                    let value = get("value");
+                    if tag == "input" {
+                        let ty = get("type").to_ascii_lowercase();
+                        if !matches!(ty.as_str(), "hidden" | "reset" | "button") {
+                            if required && value.is_empty() {
+                                invalid = true;
+                            } else if ty == "email" && !value.is_empty() {
+                                let ok = value.contains('@')
+                                    && !value.starts_with('@')
+                                    && !value.ends_with('@')
+                                    && value.matches('@').count() == 1;
+                                invalid = !ok;
+                            } else if ty == "url" && !value.is_empty() {
+                                invalid = !value.contains("://");
+                            }
+                        }
+                    } else if tag == "textarea" {
+                        if required && value.is_empty() {
+                            invalid = true;
+                        }
+                    } else if tag == "select" && required {
+                        // 选中 option 的"值"为空 → invalid(spec:value fallback
+                        // 是 option 的文本内容)。无 selected 属性时按第一个 option。
+                        let state = self.tree.with_node(self.node_id, |n| {
+                            let mut saw_selected = false;
+                            let mut selected_invalid = false;
+                            let mut first_invalid = false;
+                            let mut first_seen = false;
+                            let mut c = n.first_child;
+                            while let Some(cid) = c {
+                                let Some(child) = self.tree.with_node(cid, |cn| {
+                                    // option.value 的 spec fallback = option 的
+                                    // 文本内容(在 first_child 的 Text 节点里,
+                                    // 不在 option 自身的 Element data 上)。
+                                    let text = cn
+                                        .first_child
+                                        .and_then(|fc| {
+                                            self.tree.with_node(fc, |tn| match &tn.data {
+                                                NodeData::Text { contents } => contents.clone(),
+                                                _ => String::new(),
+                                            })
+                                        })
+                                        .unwrap_or_default();
+                                    (
+                                        cn.as_element()
+                                            .map(|q| q.local.to_string())
+                                            .unwrap_or_default(),
+                                        cn.get_attribute("value").unwrap_or("").to_string(),
+                                        cn.get_attribute("selected").is_some(),
+                                        cn.first_child,
+                                        cn.next_sibling,
+                                        text,
+                                    )
+                                }) else { break };
+                                if child.0 == "option" {
+                                    let val = if child.1.is_empty() { child.5 } else { child.1 };
+                                    let is_empty_val = val.trim().is_empty();
+                                    if child.2 {
+                                        saw_selected = true;
+                                        selected_invalid = is_empty_val;
+                                    }
+                                    if !first_seen {
+                                        first_seen = true;
+                                        first_invalid = is_empty_val;
+                                    }
+                                }
+                                c = child.4;
+                            }
+                            (saw_selected, selected_invalid, first_invalid)
+                        });
+                        if let Some((saw_selected, sel_inv, first_inv)) = state {
+                            invalid = if saw_selected { sel_inv } else { first_inv };
+                        }
+                    }
+                }
+                // fieldset/form:子树里任一 invalid 控件传播(spec 约束校验)
+                if !invalid && matches!(tag.as_str(), "fieldset" | "form") {
+                    let ids = self.tree.descendants(self.node_id);
+                    invalid = ids.iter().any(|&nid| {
+                        self.tree.with_node(nid, |n| {
+                            let Some(q) = n.as_element() else { return false };
+                            let t = q.local.as_ref().to_ascii_lowercase();
+                            if !matches!(t.as_str(), "input" | "select" | "textarea") {
+                                return false;
+                            }
+                            if n.get_attribute("disabled").is_some() {
+                                return false;
+                            }
+                            let get = |name: &str| -> String {
+                                n.get_attribute(name).unwrap_or("").to_string()
+                            };
+                            let required = n.get_attribute("required").is_some();
+                            let value = get("value");
+                            if t == "input" {
+                                let ty = get("type").to_ascii_lowercase();
+                                if matches!(ty.as_str(), "hidden" | "reset" | "button") {
+                                    return false;
+                                }
+                                if required && value.is_empty() {
+                                    return true;
+                                }
+                                if ty == "email" && !value.is_empty() {
+                                    return !(value.contains('@')
+                                        && !value.starts_with('@')
+                                        && !value.ends_with('@')
+                                        && value.matches('@').count() == 1);
+                                }
+                                if ty == "url" && !value.is_empty() {
+                                    return !value.contains("://");
+                                }
+                                false
+                            } else {
+                                required && value.is_empty()
+                            }
+                        })
+                        .unwrap_or(false)
+                    });
+                }
+                if want_invalid { invalid } else { !invalid }
             }
             // Dynamic user-interaction pseudo-classes have no meaning against
             // a static DOM snapshot with no live user input.
@@ -527,7 +798,9 @@ impl<'a> Element for DomElement<'a> {
             .with_node(self.node_id, |n| {
                 n.as_element()
                     .map(|name| {
-                        matches!(name.local.as_ref(), "a" | "area" | "link")
+                        // WHATWG/HTML::link:只有 a/area 元素算链接,<link> 是
+                        // 元数据元素,不算(:visited 用例断言 <link> 不匹配)。
+                        matches!(name.local.as_ref(), "a" | "area")
                             && n.get_attribute("href").is_some()
                     })
                     .unwrap_or(false)
@@ -603,17 +876,14 @@ impl<'a> Element for DomElement<'a> {
     }
 
     fn is_root(&self) -> bool {
+        // :root 只匹配文档的 documentElement。DocumentFragment 的 backing
+        // 节点与 detached document 共用 NodeData::Document 类型,不能按
+        // 类型判 —— 必须精确等于本树的 document 节点(否则
+        // Fragment.querySelector(':root') 会误匹配 fragment 里的 html)。
+        let doc = self.tree.document();
         self.tree
             .with_node(self.node_id, |n| {
-                n.parent
-                    .map(|parent_id| {
-                        !self.tree.is_shadow_root(parent_id)
-                            && self
-                                .tree
-                                .with_node(parent_id, |p| p.is_document())
-                                .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
+                n.parent == Some(doc)
             })
             .unwrap_or(false)
     }
@@ -733,6 +1003,12 @@ impl DomTree {
 
         for desc_id in self.descendants(root) {
             let is_element = self.with_node(desc_id, |n| n.is_element()).unwrap_or(false);
+            // Skip non-Element nodes: querySelector matches elements only.
+            // Stray Document nodes (shadow roots, iframe backing docs) must
+            // not appear in results.
+            if !is_element {
+                continue;
+            }
             if is_element {
                 let element = DomElement::new(self, desc_id);
                 if selectors::matching::matches_selector_list(
@@ -776,6 +1052,12 @@ impl DomTree {
 
         for desc_id in self.descendants(root) {
             let is_element = self.with_node(desc_id, |n| n.is_element()).unwrap_or(false);
+            // Skip non-Element nodes: querySelector matches elements only.
+            // Stray Document nodes (shadow roots, iframe backing docs) must
+            // not appear in results.
+            if !is_element {
+                continue;
+            }
             if is_element {
                 let element = DomElement::new(self, desc_id);
                 if selectors::matching::matches_selector_list(
@@ -793,6 +1075,18 @@ impl DomTree {
     /// Test one element as the selector subject, including when it is
     /// detached or is a direct child of a shadow-tree compatibility root.
     pub fn matches_selector(&self, nid: NodeId, selector: &str) -> Result<bool, String> {
+        self.matches_selector_scoped(nid, Some(nid), selector)
+    }
+
+    /// `scope_nid`:':scope' 的解析目标。Element.matches 用被测元素自身;
+    /// closest 用**调用起点**(spec:逐祖先匹配时 :scope 恒为起点,
+    /// WPT Element-closest 的 ':scope' / 'div > :scope' / ':has(> :scope)')
+    pub fn matches_selector_scoped(
+        &self,
+        nid: NodeId,
+        scope_nid: Option<NodeId>,
+        selector: &str,
+    ) -> Result<bool, String> {
         if !self
             .with_node(nid, |node| node.is_element())
             .unwrap_or(false)
@@ -809,6 +1103,7 @@ impl DomTree {
             NeedsSelectorFlags::No,
             MatchingForInvalidation::No,
         );
+        context.scope_element = scope_nid.map(|sn| DomElement::new(self, sn).opaque());
         Ok(selectors::matching::matches_selector_list(
             &selector_list,
             &DomElement::new(self, nid),
@@ -1643,6 +1938,23 @@ mod tests {
         );
         let results = tree.query_selector_all(".list .item.active").unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_select_invalid_required() {
+        let tree = parse_html(
+            "<fieldset id=\"test2\"><select id=\"test3\" required><option id=\"t4\" value=\"\">A</option><option id=\"t11\" selected>B</option></select><input id=\"test1\" required></fieldset>",
+        );
+        let sel = tree.get_element_by_id("test3").unwrap();
+        let m = tree.matches_selector(sel, ":invalid").unwrap();
+        // 选中 option(selected)的 fallback 文本 "B" 非空 → select 有效
+        assert!(!m, "select with selected non-empty option must be :valid");
+        let input = tree.get_element_by_id("test1").unwrap();
+        let mi = tree.matches_selector(input, ":invalid").unwrap();
+        assert!(mi, "required empty input must be :invalid");
+        let fs = tree.get_element_by_id("test2").unwrap();
+        let mf = tree.matches_selector(fs, ":invalid").unwrap();
+        assert!(mf, "fieldset with invalid descendant must be :invalid");
     }
 
     #[test]

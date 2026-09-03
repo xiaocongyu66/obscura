@@ -64,8 +64,10 @@ pub fn decode_response_with_name(
     content_type_header: Option<&str>,
 ) -> (String, &'static str) {
     let (encoding, _) = detect_encoding(bytes, content_type_header);
-    let (cow, _, _) = encoding.decode(bytes);
-    (cow.into_owned(), encoding.name())
+    // WHATWG:BOM 优先于一切声明——decode 实际使用的编码(BOM 命中时与
+    // detect 结果不同)才是 document.characterSet 应该报告的值。
+    let (cow, actual, _) = encoding.decode(bytes);
+    (cow.into_owned(), actual.name())
 }
 
 const PCT_HEX: &[u8; 16] = b"0123456789ABCDEF";

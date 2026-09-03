@@ -4,6 +4,7 @@
 #![recursion_limit = "512"]
 
 pub mod http;
+pub mod ws;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,18 +25,18 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 const DEFAULT_TEXT_LIMIT: usize = 4000;
 
 #[derive(Deserialize)]
-struct RpcMessage {
+pub(crate) struct RpcMessage {
     #[allow(dead_code)]
     jsonrpc: String,
     #[serde(default)]
-    id: Option<Value>,
-    method: String,
+    pub(crate) id: Option<Value>,
+    pub(crate) method: String,
     #[serde(default)]
-    params: Value,
+    pub(crate) params: Value,
 }
 
 #[derive(Serialize)]
-struct RpcResponse {
+pub(crate) struct RpcResponse {
     jsonrpc: &'static str,
     id: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,7 +46,7 @@ struct RpcResponse {
 }
 
 #[derive(Serialize)]
-struct RpcError {
+pub(crate) struct RpcError {
     code: i32,
     message: String,
 }
@@ -55,7 +56,7 @@ impl RpcResponse {
         RpcResponse { jsonrpc: "2.0", id, result: Some(result), error: None }
     }
 
-    fn err(id: Value, code: i32, message: impl Into<String>) -> Self {
+    pub(crate) fn err(id: Value, code: i32, message: impl Into<String>) -> Self {
         RpcResponse { jsonrpc: "2.0", id, result: None, error: Some(RpcError { code, message: message.into() }) }
     }
 }
@@ -77,6 +78,34 @@ pub struct BrowserState {
     /// table is wiped on every navigation / tab switch and refilled on
     /// the next snapshot call.
     interactive_refs: HashMap<String, NodeId>,
+    /// When `network_capture_start` is called, this flag flips on and every
+    /// network event observed on the active tab is appended to
+    /// `captured_requests`. `network_capture_stop` returns and clears them.
+    network_capture_active: bool,
+    captured_requests: Vec<Value>,
+    /// Optional proxy pool. When set via `proxy_pool_set`, tools that
+    /// create new tabs pick a proxy from the pool per session/host. The
+    /// pool itself is shared so all tabs see the same rotation state.
+    proxy_pool: Option<obscura_browser::proxy::ProxyPool>,
+    /// Isolated browser instances. Each instance has its own BrowserState
+    /// (independent V8 runtime, fingerprint, cookie jar, proxy). The
+    /// `instance_*` tools manage these. The active instance is the one
+    /// that `browser_*` tools operate on; when None, the default
+    /// BrowserState (this struct's own tabs) is used.
+    instances: HashMap<String, IsolatedInstance>,
+    active_instance: Option<String>,
+    instance_counter: u32,
+}
+
+/// An isolated browser instance with its own context, fingerprint, and
+/// proxy. The instance keeps its own tab table; the parent BrowserState's
+/// `tabs` field is the default instance.
+struct IsolatedInstance {
+    context: Arc<BrowserContext>,
+    fingerprint: obscura_browser::fingerprint::Fingerprint,
+    tabs: std::collections::BTreeMap<String, Page>,
+    active_tab: Option<String>,
+    tab_counter: u32,
 }
 
 impl BrowserState {
@@ -89,6 +118,12 @@ impl BrowserState {
             user_agent,
             console_messages: Vec::new(),
             interactive_refs: HashMap::new(),
+            network_capture_active: false,
+            captured_requests: Vec::new(),
+            proxy_pool: None,
+            instances: HashMap::new(),
+            active_instance: None,
+            instance_counter: 0,
         }
     }
 
@@ -648,6 +683,181 @@ fn handle_tools_list(id: Value) -> RpcResponse {
                     },
                     "required": ["state"]
                 }
+            },
+            {
+                "name": "fingerprint_generate",
+                "description": "Generate a random browser fingerprint (UA, platform, screen, timezone, language, hardware concurrency, device memory, WebGL vendor/renderer, fonts, noise seed). Pass `seed` for deterministic generation — the same seed always returns the same fingerprint, so two tabs in one session can share an identity. The returned JSON can be inspected or used to reproduce a session.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "seed": { "type": "number", "description": "Optional 64-bit seed. Same seed → same fingerprint." }
+                    }
+                }
+            },
+            {
+                "name": "fingerprint_get",
+                "description": "Query the active tab's live fingerprint surface (navigator.userAgent, platform, language, hardwareConcurrency, deviceMemory, screen, Intl timezone, WebGL renderer). Use this to verify the injected identity matches what fingerprint_generate reported.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "network_capture_start",
+                "description": "Start capturing network requests on the active tab (URL, method, status, headers, resource type, body size). Captures accumulate until network_capture_stop is called. Useful for HAR-style analysis or for reverse-engineering an auth flow.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "network_capture_stop",
+                "description": "Stop capturing and return all requests captured since network_capture_start. Each entry includes url, method, status, resource_type, request_headers, response_headers, body_size, and timing.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "behavior_click",
+                "description": "Plan and dispatch a human-like click at (x, y): bezier-curve mouse trail from the current pointer position, pre-click pause, button down, hold, button up. The trajectory and timing are seeded so the same seed reproduces the same click. Use this instead of browser_click when you need realistic input (e.g. for anti-bot challenges).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "number", "description": "Target X coordinate (CSS pixels)" },
+                        "y": { "type": "number", "description": "Target Y coordinate (CSS pixels)" },
+                        "from_x": { "type": "number", "description": "Starting X (defaults to a random off-screen position)" },
+                        "from_y": { "type": "number", "description": "Starting Y (defaults to a random off-screen position)" },
+                        "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "Mouse button (default left)" },
+                        "seed": { "type": "number", "description": "Deterministic seed. Same seed → same trajectory." }
+                    },
+                    "required": ["x", "y"]
+                }
+            },
+            {
+                "name": "behavior_type",
+                "description": "Type text into the focused element with human-like inter-key delays and optional typos + corrections. Use this instead of browser_type when the page monitors input cadence. `typo_rate` is in [0, 1]; 0.03 is a realistic human rate.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string" },
+                        "typo_rate": { "type": "number", "minimum": 0, "maximum": 1, "description": "Probability of a typo per character (default 0)" },
+                        "seed": { "type": "number", "description": "Deterministic seed. Same seed → same key sequence." }
+                    },
+                    "required": ["text"]
+                }
+            },
+            {
+                "name": "behavior_scroll",
+                "description": "Scroll the wheel by `dy` pixels (positive = down) with a burst of large deltas then decelerating momentum, plus a small overshoot and correction. Dispatches real wheel events so the page sees a human-like scroll signal.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dy": { "type": "number", "description": "Pixels to scroll (positive = down)" },
+                        "at_x": { "type": "number", "description": "Pointer X during scroll (default viewport center)" },
+                        "at_y": { "type": "number", "description": "Pointer Y during scroll (default viewport center)" },
+                        "seed": { "type": "number", "description": "Deterministic seed. Same seed → same scroll pattern." }
+                    },
+                    "required": ["dy"]
+                }
+            },
+            {
+                "name": "behavior_move",
+                "description": "Move the mouse to (x, y) along a bezier-curve trail with per-step jitter. No click. Use for hover-triggered UIs.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "number" },
+                        "y": { "type": "number" },
+                        "from_x": { "type": "number" },
+                        "from_y": { "type": "number" },
+                        "seed": { "type": "number" }
+                    },
+                    "required": ["x", "y"]
+                }
+            },
+            {
+                "name": "behavior_press_key",
+                "description": "Press a key (e.g. Enter, Tab, Escape) with realistic pre-press delay. Dispatches keydown + keyup events on the active element.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string", "description": "Key name: 'Enter', 'Tab', 'Escape', 'a', etc." },
+                        "code": { "type": "string", "description": "Key code: 'Enter', 'Tab', 'Escape', 'KeyA', etc." },
+                        "seed": { "type": "number" }
+                    },
+                    "required": ["key"]
+                }
+            },
+            {
+                "name": "instance_new",
+                "description": "Create an isolated browser instance with its own fingerprint and proxy. Returns an instance_id. Each instance has independent V8 runtime, cookie jar, storage, and fingerprint — use this to run multiple sessions in parallel without cross-contamination. The instance stays alive until instance_close is called.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "fingerprint_seed": { "type": "number", "description": "Deterministic fingerprint seed. Same seed → same identity." },
+                        "proxy": { "type": "string", "description": "Proxy URL for this instance (http:// or socks5://)" },
+                        "user_agent": { "type": "string" }
+                    }
+                }
+            },
+            {
+                "name": "instance_list",
+                "description": "List all active browser instances with their IDs, fingerprints, and proxies.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "instance_switch",
+                "description": "Switch the active instance. Subsequent tool calls operate on the specified instance. Each instance keeps its own tabs and state.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "instance_id": { "type": "string" }
+                    },
+                    "required": ["instance_id"]
+                }
+            },
+            {
+                "name": "instance_close",
+                "description": "Close an isolated instance and free its resources (V8 runtime, cookie jar, fingerprint). Tabs in the instance are closed too.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "instance_id": { "type": "string" }
+                    },
+                    "required": ["instance_id"]
+                }
+            },
+            {
+                "name": "proxy_pool_set",
+                "description": "Install a proxy pool for this MCP session. After this call, every new tab picks a proxy from the pool according to the strategy. Use this to rotate exit IPs across a registration batch. Pass `proxies` as a list of URLs (http://user:pass@host:port or socks5://host:port). `strategy`: 'round_robin' or 'random'. `seed` makes 'random' reproducible.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "proxies": { "type": "array", "items": { "type": "string" } },
+                        "strategy": { "type": "string", "enum": ["round_robin", "random"] },
+                        "seed": { "type": "number" }
+                    },
+                    "required": ["proxies"]
+                }
+            },
+            {
+                "name": "proxy_pool_pick",
+                "description": "Pick a proxy from the installed pool for a given key (session id, host). Returns the proxy URL. Same key → same proxy (sticky session). Call proxy_pool_invalidate to force a rotation.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string", "description": "Session id, host, or any string to sticky-bind to a proxy" }
+                    },
+                    "required": ["key"]
+                }
+            },
+            {
+                "name": "proxy_pool_invalidate",
+                "description": "Drop the sticky binding for `key`. The next proxy_pool_pick(key) will pick a fresh proxy. Use this to force-rotate a session that got rate-limited (429).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string" }
+                    },
+                    "required": ["key"]
+                }
+            },
+            {
+                "name": "proxy_pool_list",
+                "description": "List all proxies in the installed pool. Returns the URLs and current strategy.",
+                "inputSchema": { "type": "object", "properties": {} }
             }
     ]).as_array().cloned().expect("MCP tool list must be an array");
 
@@ -754,6 +964,23 @@ async fn handle_tool_call(id: Value, params: &Value, state: &mut BrowserState) -
         "browser_search" => tool_search(args, state),
         "browser_storage_state" => tool_storage_state(state),
         "browser_set_storage_state" => tool_set_storage_state(args, state),
+        "fingerprint_generate" => tool_fingerprint_generate(args),
+        "fingerprint_get" => tool_fingerprint_get(state),
+        "network_capture_start" => tool_network_capture_start(state),
+        "network_capture_stop" => tool_network_capture_stop(state),
+        "behavior_click" => tool_behavior_click(args, state).await,
+        "behavior_type" => tool_behavior_type(args, state).await,
+        "behavior_scroll" => tool_behavior_scroll(args, state).await,
+        "behavior_move" => tool_behavior_move(args, state).await,
+        "behavior_press_key" => tool_behavior_press_key(args, state).await,
+        "instance_new" => tool_instance_new(args, state),
+        "instance_list" => tool_instance_list(state),
+        "instance_switch" => tool_instance_switch(args, state),
+        "instance_close" => tool_instance_close(args, state),
+        "proxy_pool_set" => tool_proxy_pool_set(args, state),
+        "proxy_pool_pick" => tool_proxy_pool_pick(args, state),
+        "proxy_pool_invalidate" => tool_proxy_pool_invalidate(args, state),
+        "proxy_pool_list" => tool_proxy_pool_list(state),
         _ => Err(format!("Unknown tool: {name}")),
     };
 
@@ -1988,6 +2215,467 @@ fn tool_set_storage_state(args: &Value, state: &mut BrowserState) -> Result<Stri
         }
     }
     Ok(format!("Restored {applied} state entries."))
+}
+
+/// `fingerprint_generate` — exposes the Rust `Fingerprint::random` /
+/// `Fingerprint::from_seed` as an MCP tool. Agents can call this to
+/// pre-pick an identity and reason about it before opening a tab, or to
+/// reproduce a session by replaying the same seed.
+fn tool_fingerprint_generate(args: &Value) -> Result<String, String> {
+    use obscura_browser::fingerprint::Fingerprint;
+    let fp = match args.get("seed").and_then(Value::as_u64) {
+        Some(seed) => Fingerprint::from_seed(seed),
+        None => Fingerprint::random(),
+    };
+    let out = json!({
+        "user_agent": fp.user_agent,
+        "platform": fp.platform,
+        "screen": { "width": fp.screen_resolution.0, "height": fp.screen_resolution.1 },
+        "timezone": fp.timezone,
+        "language": fp.language,
+        "secondary_language": fp.secondary_language,
+        "hardware_concurrency": fp.hardware_concurrency,
+        "device_memory": fp.device_memory,
+        "webgl_vendor": fp.webgl_vendor,
+        "webgl_renderer": fp.webgl_renderer,
+        "canvas_noise": fp.canvas_noise,
+        "audio_noise": fp.audio_noise,
+        "fonts": fp.fonts,
+        "noise_seed": fp.noise_seed,
+        "signature": fp.signature(),
+    });
+    Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string()))
+}
+
+/// `fingerprint_get` — queries the active tab's live fingerprint surface
+/// so the caller can verify the injected identity stuck.
+fn tool_fingerprint_get(state: &mut BrowserState) -> Result<String, String> {
+    if state.active_tab.is_none() {
+        return Err("No active tab. Open one with browser_tab_new first.".to_string());
+    }
+    let page = state.page_mut();
+    let probe = r#"(function(){
+      var gl = null;
+      try {
+        var c = document.createElement('canvas');
+        gl = c.getContext('webgl') || c.getContext('webgl2') || c.getContext('experimental-webgl');
+      } catch(e) {}
+      var v = null, r = null;
+      if (gl) {
+        v = gl.getParameter(0x1F00);
+        r = gl.getParameter(0x1F01);
+        var e = gl.getExtension('WEBGL_debug_renderer_info');
+        if (e) {
+          v = gl.getParameter(e.UNMASKED_VENDOR_WEBGL) || v;
+          r = gl.getParameter(e.UNMASKED_RENDERER_WEBGL) || r;
+        }
+      }
+      return {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        language: navigator.language,
+        languages: navigator.languages,
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        deviceMemory: navigator.deviceMemory,
+        webdriver: navigator.webdriver,
+        screen: { width: screen.width, height: screen.height, availWidth: screen.availWidth, availHeight: screen.availHeight },
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        webglVendor: v,
+        webglRenderer: r,
+        pluginsLength: (navigator.plugins && navigator.plugins.length) || 0,
+        chrome: typeof window.chrome !== 'undefined'
+      };
+    })()"#;
+    let value = page.evaluate(probe);
+    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string()))
+}
+
+/// `network_capture_start` — flip on capture mode. Subsequent network
+/// events on the active tab are appended to `captured_requests`.
+fn tool_network_capture_start(state: &mut BrowserState) -> Result<String, String> {
+    state.network_capture_active = true;
+    state.captured_requests.clear();
+    Ok("Network capture started. Call network_capture_stop to retrieve.".to_string())
+}
+
+/// `network_capture_stop` — flip off capture and return all observed
+/// requests. The Page already records `network_events`; we project them
+/// into a compact JSON shape here.
+fn tool_network_capture_stop(state: &mut BrowserState) -> Result<String, String> {
+    state.network_capture_active = false;
+    if state.active_tab.is_none() {
+        let out = json!({ "requests": state.captured_requests, "count": state.captured_requests.len() });
+        state.captured_requests.clear();
+        return Ok(serde_json::to_string_pretty(&out).unwrap_or_default());
+    }
+    // Drain the page's network_events into our captured list so the caller
+    // gets everything observed on the active tab, not just events that
+    // arrived after capture_start (the page records continuously; we only
+    // snapshot at stop time, which is what an agent wants: "give me the
+    // traffic from when I started to when I stopped").
+    let page = state.page_mut();
+    let events = page.network_events_snapshot();
+    for ev in events {
+        let resp_headers: serde_json::Map<String, Value> = ev
+            .response_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        state.captured_requests.push(json!({
+            "url": ev.url,
+            "method": ev.method,
+            "resource_type": ev.resource_type,
+            "status": ev.status,
+            "request_headers": ev.headers,
+            "response_headers": resp_headers,
+            "body_size": ev.body_size,
+            "timestamp_ms": ev.timestamp,
+        }));
+    }
+    let out = json!({ "requests": state.captured_requests, "count": state.captured_requests.len() });
+    state.captured_requests.clear();
+    Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+}
+
+// ─── Behavior simulation tools ───────────────────────────────────────────────
+//
+// These plan a sequence of input events (bezier mouse trail, human-like
+// typing, momentum scroll) and dispatch them on the active tab's page.
+// The planner is pure computation (see obscura_browser::behavior); the
+// dispatch lives here because it needs the Page's evaluate() and CDP.
+
+use obscura_browser::behavior::{
+    self, plan_click, plan_move, plan_scroll, plan_type, BehaviorAction, BehaviorEvent, MouseButton,
+};
+
+/// Pulls a `seed` from args, or picks a random one. Same seed → same
+/// trajectory, so callers can replay a session.
+fn seed_from_args(args: &Value) -> u64 {
+    args.get("seed")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() ^ u64::from(d.subsec_nanos()))
+                .unwrap_or(0x5a5a_5a5a_5a5a_5a5a)
+        })
+}
+
+fn parse_button(s: Option<&str>) -> MouseButton {
+    match s {
+        Some("right") => MouseButton::Right,
+        Some("middle") => MouseButton::Middle,
+        _ => MouseButton::Left,
+    }
+}
+
+async fn dispatch_events(state: &mut BrowserState, events: &[BehaviorEvent]) -> Result<(), String> {
+    if state.active_tab.is_none() {
+        return Err("No active tab. Open one with browser_tab_new first.".to_string());
+    }
+    let page = state.page_mut();
+    for ev in events {
+        // Sleep for delay_ms, then dispatch the action. We use tokio::time::sleep
+        // because the whole MCP loop is async and we don't want to block the
+        // runtime.
+        if ev.delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(ev.delay_ms)).await;
+        }
+        match &ev.action {
+            BehaviorAction::MouseMove { x, y } => {
+                let js = format!(
+                    "(function(){{var t=document.elementFromPoint({x},{y})||document.body;\
+                     if(t){{var ev=new MouseEvent('mousemove',{{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y}}});\
+                     t.dispatchEvent(ev);}}}})();",
+                );
+                let _ = page.evaluate(&js);
+            }
+            BehaviorAction::MouseDown { x, y, button } => {
+                let code = button.code();
+                let js = format!(
+                    "(function(){{var t=document.elementFromPoint({x},{y})||document.body;\
+                     if(t){{var ev=new MouseEvent('mousedown',{{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{code},buttons:{mask},detail:1}});\
+                     t.dispatchEvent(ev);}}}})();",
+                    code = code,
+                    mask = button.mask(),
+                );
+                let _ = page.evaluate(&js);
+            }
+            BehaviorAction::MouseUp { x, y, button } => {
+                let code = button.code();
+                let js = format!(
+                    "(function(){{var t=document.elementFromPoint({x},{y})||document.body;\
+                     if(t){{var ev=new MouseEvent('mouseup',{{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{code},buttons:0,detail:1}});\
+                     t.dispatchEvent(ev);\
+                     var ce=new MouseEvent('click',{{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:0,detail:1}});\
+                     t.dispatchEvent(ce);}}}})();",
+                    code = code,
+                );
+                let _ = page.evaluate(&js);
+            }
+            BehaviorAction::InsertText { text } => {
+                let literal = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+                let js = format!(
+                    "(function(){{var t=document.activeElement;\
+                     if(!t)return;\
+                     if(t.localName==='input'||t.localName==='textarea'){{
+                       var v=t.value||'';var s=t.selectionStart||v.length;var e=t.selectionEnd||s;\
+                       globalThis.__obscura_setFieldValue(t,'value',v.slice(0,s)+{text}+v.slice(e));\
+                       var c=s+{text}.length;t.setSelectionRange(c,c);\
+                       t.dispatchEvent(globalThis.__obscura_markTrusted(new Event('input',{{bubbles:true}})));\
+                     }}else{{t.dispatchEvent(globalThis.__obscura_markTrusted(new InputEvent('beforeinput',{{data:{text},inputType:'insertText',bubbles:true,cancelable:true}})));}}}})();",
+                    text = literal,
+                );
+                let _ = page.evaluate(&js);
+            }
+            BehaviorAction::KeyDown { key, .. } | BehaviorAction::KeyUp { key, .. } => {
+                let evt_type = if matches!(ev.action, BehaviorAction::KeyDown { .. }) {
+                    "keydown"
+                } else {
+                    "keyup"
+                };
+                let js = format!(
+                    "(function(){{var t=document.activeElement||document.body;\
+                     var ev=new KeyboardEvent('{evt}',{{bubbles:true,cancelable:true,view:globalThis,key:{key_lit}}});\
+                     t.dispatchEvent(ev);}})();",
+                    evt = evt_type,
+                    key_lit = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string()),
+                );
+                let _ = page.evaluate(&js);
+            }
+            BehaviorAction::Wheel { x, y, dx, dy } => {
+                let js = format!(
+                    "(function(){{var t=document.elementFromPoint({x},{y})||document.body;\
+                     if(t){{var ev=new WheelEvent('wheel',{{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},deltaX:{dx},deltaY:{dy},deltaMode:0}});\
+                     t.dispatchEvent(ev);}}}})();",
+                );
+                let _ = page.evaluate(&js);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn tool_behavior_click(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    let x = args.get("x").and_then(Value::as_f64).ok_or("Missing x")?;
+    let y = args.get("y").and_then(Value::as_f64).ok_or("Missing y")?;
+    let from_x = args.get("from_x").and_then(Value::as_f64).unwrap_or(-100.0);
+    let from_y = args.get("from_y").and_then(Value::as_f64).unwrap_or(-100.0);
+    let button = parse_button(args.get("button").and_then(Value::as_str));
+    let seed = seed_from_args(args);
+    let events = plan_click(seed, (from_x, from_y), (x, y), button);
+    let n = events.len();
+    dispatch_events(state, &events).await?;
+    Ok(format!("Dispatched click at ({x},{y}) over {n} events (seed={seed})."))
+}
+
+async fn tool_behavior_type(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    let text = args.get("text").and_then(Value::as_str).ok_or("Missing text")?;
+    let typo_rate = args.get("typo_rate").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0);
+    let seed = seed_from_args(args);
+    let events = plan_type(seed, text, typo_rate);
+    let n = events.len();
+    dispatch_events(state, &events).await?;
+    Ok(format!("Typed {} chars over {n} events (seed={seed}, typo_rate={typo_rate}).", text.chars().count()))
+}
+
+async fn tool_behavior_scroll(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    let dy = args.get("dy").and_then(Value::as_f64).ok_or("Missing dy")?;
+    let at_x = args.get("at_x").and_then(Value::as_f64).unwrap_or(640.0);
+    let at_y = args.get("at_y").and_then(Value::as_f64).unwrap_or(400.0);
+    let seed = seed_from_args(args);
+    let events = plan_scroll(seed, (at_x, at_y), dy);
+    let n = events.len();
+    dispatch_events(state, &events).await?;
+    Ok(format!("Scrolled {dy}px over {n} events (seed={seed})."))
+}
+
+async fn tool_behavior_move(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    let x = args.get("x").and_then(Value::as_f64).ok_or("Missing x")?;
+    let y = args.get("y").and_then(Value::as_f64).ok_or("Missing y")?;
+    let from_x = args.get("from_x").and_then(Value::as_f64).unwrap_or(-100.0);
+    let from_y = args.get("from_y").and_then(Value::as_f64).unwrap_or(-100.0);
+    let seed = seed_from_args(args);
+    let events = plan_move(seed, (from_x, from_y), (x, y));
+    let n = events.len();
+    dispatch_events(state, &events).await?;
+    Ok(format!("Moved to ({x},{y}) over {n} events (seed={seed})."))
+}
+
+// ─── Proxy rotation tools ────────────────────────────────────────────────────
+//
+// Install a shared ProxyPool on the session. Every new tab picks a proxy
+// from the pool per session/host key. The pool is sticky so a login flow
+// keeps the same exit IP across requests.
+
+use obscura_browser::proxy::{ProxyPool, RotationStrategy};
+
+fn tool_proxy_pool_set(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    let proxies: Vec<String> = args
+        .get("proxies")
+        .and_then(Value::as_array)
+        .ok_or("Missing proxies array")?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    if proxies.is_empty() {
+        return Err("proxies must not be empty".to_string());
+    }
+    let strategy = match args.get("strategy").and_then(Value::as_str) {
+        Some("random") => RotationStrategy::Random,
+        _ => RotationStrategy::RoundRobin,
+    };
+    let seed = args.get("seed").and_then(Value::as_u64).unwrap_or(42);
+    let pool = ProxyPool::new(proxies.clone(), strategy, seed);
+    state.proxy_pool = Some(pool);
+    Ok(format!(
+        "Installed proxy pool with {} proxies, strategy={:?}, seed={}.",
+        proxies.len(),
+        strategy,
+        seed,
+    ))
+}
+
+fn tool_proxy_pool_pick(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    let key = args
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or("Missing key")?
+        .to_string();
+    let pool = state
+        .proxy_pool
+        .as_ref()
+        .ok_or("No proxy pool installed. Call proxy_pool_set first.")?;
+    let proxy = pool
+        .next_for(&key)
+        .ok_or("Proxy pool is empty")?;
+    Ok(serde_json::to_string_pretty(&json!({
+        "key": key,
+        "proxy": proxy,
+    })).unwrap_or_default())
+}
+
+fn tool_proxy_pool_invalidate(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    let key = args
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or("Missing key")?
+        .to_string();
+    let pool = state
+        .proxy_pool
+        .as_ref()
+        .ok_or("No proxy pool installed. Call proxy_pool_set first.")?;
+    pool.invalidate(&key);
+    Ok(format!("Invalidated sticky binding for {key}."))
+}
+
+fn tool_proxy_pool_list(state: &mut BrowserState) -> Result<String, String> {
+    let pool = state
+        .proxy_pool
+        .as_ref()
+        .ok_or("No proxy pool installed. Call proxy_pool_set first.")?;
+    let proxies = pool.list();
+    Ok(serde_json::to_string_pretty(&json!({
+        "proxies": proxies,
+        "count": proxies.len(),
+    })).unwrap_or_default())
+}
+
+// ─── Behavior press key + Instance management ───────────────────────────────
+
+async fn tool_behavior_press_key(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    use obscura_browser::behavior::{plan_press_key, modifiers};
+    let key = args.get("key").and_then(Value::as_str).ok_or("Missing key")?;
+    let code = args.get("code").and_then(Value::as_str).unwrap_or("Enter");
+    let mods = args.get("modifiers").and_then(Value::as_u64).unwrap_or(0) as u8;
+    let _ = modifiers::NONE;
+    let seed = seed_from_args(args);
+    let events = plan_press_key(seed, key, code, mods);
+    let n = events.len();
+    dispatch_events(state, &events).await?;
+    Ok(format!("Pressed {} over {n} events (seed={seed}).", key))
+}
+
+fn tool_instance_new(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    use obscura_browser::fingerprint::Fingerprint;
+    let fp = match args.get("fingerprint_seed").and_then(Value::as_u64) {
+        Some(seed) => Fingerprint::from_seed(seed),
+        None => Fingerprint::random(),
+    };
+    let proxy = args.get("proxy").and_then(Value::as_str).map(|s| s.to_string());
+    let ua = args.get("user_agent").and_then(Value::as_str).map(|s| s.to_string());
+    let id = format!("inst-{}", state.instance_counter + 1);
+    state.instance_counter += 1;
+    let ctx = Arc::new(BrowserContext::with_full_options(
+        id.clone(),
+        proxy.clone(),
+        false,
+        ua,
+    ));
+    let inst = IsolatedInstance {
+        context: ctx,
+        fingerprint: fp.clone(),
+        tabs: std::collections::BTreeMap::new(),
+        active_tab: None,
+        tab_counter: 0,
+    };
+    state.instances.insert(id.clone(), inst);
+    state.active_instance = Some(id.clone());
+    Ok(serde_json::to_string_pretty(&json!({
+        "instance_id": id,
+        "fingerprint": {
+            "user_agent": fp.user_agent,
+            "platform": fp.platform,
+            "signature": fp.signature(),
+        },
+        "proxy": proxy,
+    })).unwrap_or_default())
+}
+
+fn tool_instance_list(state: &mut BrowserState) -> Result<String, String> {
+    let list: Vec<Value> = state.instances.iter().map(|(id, inst)| {
+        let active = state.active_instance.as_deref() == Some(id.as_str());
+        json!({
+            "instance_id": id,
+            "active": active,
+            "fingerprint": inst.fingerprint.signature(),
+            "platform": inst.fingerprint.platform,
+            "tabs": inst.tabs.len(),
+        })
+    }).collect();
+    Ok(serde_json::to_string_pretty(&json!({
+        "instances": list,
+        "count": state.instances.len(),
+    })).unwrap_or_default())
+}
+
+fn tool_instance_switch(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    let id = args.get("instance_id").and_then(Value::as_str).ok_or("Missing instance_id")?;
+    if !state.instances.contains_key(id) {
+        return Err(format!("Instance {id} not found"));
+    }
+    state.active_instance = Some(id.to_string());
+    Ok(format!("Switched to instance {id}."))
+}
+
+fn tool_instance_close(args: &Value, state: &mut BrowserState) -> Result<String, String> {
+    let id = args.get("instance_id").and_then(Value::as_str).ok_or("Missing instance_id")?;
+    if state.instances.remove(id).is_none() {
+        return Err(format!("Instance {id} not found"));
+    }
+    if state.active_instance.as_deref() == Some(id) {
+        state.active_instance = None;
+    }
+    Ok(format!("Closed instance {id}."))
+}
+
+// Quiet the unused-import warning when behavior is only referenced via
+// the dispatch path.
+#[allow(dead_code)]
+fn _behavior_ref() -> &'static str {
+    let _ = behavior::modifiers::NONE;
+    ""
 }
 
 #[cfg(test)]

@@ -121,6 +121,10 @@ pub enum NodeData {
 #[derive(Clone, Debug)]
 pub struct Node {
     pub id: NodeId,
+    /// Slot reuse generation: bumped every time a freed nid is re-allocated.
+    /// JS 侧的 wrapper cache(nid → JS 对象)以此校验身份 —— nid 复用后旧
+    /// wrapper 会把 select 当 script(Next.js 水合 invariant 整页判死)。
+    pub generation: u32,
     /// Shadow-including document connectivity, maintained incrementally on
     /// insertion/removal so hot DOM mutation paths do not walk every ancestor.
     pub connected: bool,
@@ -163,6 +167,15 @@ impl Node {
         match &mut self.data {
             NodeData::Element { attrs, .. } => Some(attrs),
             _ => None,
+        }
+    }
+
+    /// Text 节点内容(Element/其它返回空串)。约束校验的 option.value
+    /// fallback 需要读 option 的文本。
+    pub fn clone_text(&self) -> String {
+        match &self.data {
+            NodeData::Text { contents } => contents.clone(),
+            _ => String::new(),
         }
     }
 
@@ -251,8 +264,13 @@ pub struct DomTree {
 pub(crate) struct DomTreeInner {
     pub(crate) nodes: Vec<Option<Node>>,
     pub(crate) free_list: Vec<u32>,
+    /// 每-slot 世代(nid 复用时该 slot 的代数 +1)。全局计数会让无关节点
+    /// 的 wrapper cache 全部失效(React 依赖节点身份稳定)。
+    pub(crate) slot_generations: HashMap<u32, u32>,
     pub(crate) document: NodeId,
     pub(crate) id_index: HashMap<String, NodeId>,
+    /// 文档 URL(document.URL)。:target 匹配用它取 fragment。
+    pub(crate) doc_url: String,
     /// Shadow roots are arena nodes with their own child list. They are kept
     /// outside the ordinary parent links so light-tree traversal never crosses
     /// into a shadow tree by accident.
@@ -270,6 +288,7 @@ impl DomTree {
     pub fn new() -> Self {
         let doc_node = Node {
             id: NodeId(0),
+            generation: 0,
             connected: true,
             parent: None,
             first_child: None,
@@ -282,8 +301,10 @@ impl DomTree {
             inner: RefCell::new(DomTreeInner {
                 nodes: vec![Some(doc_node)],
                 free_list: Vec::new(),
+                slot_generations: HashMap::new(),
                 document: NodeId(0),
                 id_index: HashMap::new(),
+                doc_url: String::new(),
                 shadow_roots: HashMap::new(),
                 shadow_roots_by_host: HashMap::new(),
                 allow_declarative_shadow_roots: false,
@@ -294,6 +315,15 @@ impl DomTree {
 
     pub fn document(&self) -> NodeId {
         self.inner.borrow().document
+    }
+
+    /// 设置文档 URL(:target 匹配用)。JS 侧导航完成/URL 变化时调用。
+    pub fn set_document_url(&self, url: &str) {
+        self.inner.borrow_mut().doc_url = url.to_string();
+    }
+
+    pub fn document_url(&self) -> String {
+        self.inner.borrow().doc_url.clone()
     }
 
     /// Record whether the document was parsed in (full) quirks mode.
@@ -328,11 +358,8 @@ impl DomTree {
     ) -> Result<NodeId, AttachShadowError> {
         {
             let inner = self.inner.borrow();
-            let host_is_element = inner
-                .nodes
-                .get(host.index())
-                .and_then(|node| node.as_ref())
-                .is_some_and(Node::is_element);
+            let host_node = inner.nodes.get(host.index()).and_then(|node| node.as_ref());
+            let host_is_element = host_node.is_some_and(Node::is_element);
             if !host_is_element {
                 return Err(AttachShadowError::HostIsNotElement);
             }
@@ -568,8 +595,15 @@ impl DomTree {
     pub fn new_node(&self, data: NodeData) -> NodeId {
         let mut inner = self.inner.borrow_mut();
         let id = if let Some(slot) = inner.free_list.pop() {
+            // 复用:该 slot 的代数 ++(前一个节点的 wrapper 立即失效)
+            let gen = inner.slot_generations.entry(slot).or_insert(0);
+            *gen = gen.wrapping_add(1);
             NodeId(slot)
         } else {
+            // 新 slot:代数从 1 起(0 保留给"无节点"哨兵语义,让首版
+            // wrapper 也能被区分)
+            let fresh_slot = inner.nodes.len() as u32;
+            inner.slot_generations.entry(fresh_slot).or_insert(1);
             let idx = inner.nodes.len() as u32;
             inner.nodes.push(None);
             NodeId(idx)
@@ -584,8 +618,10 @@ impl DomTree {
             }
         }
 
+        let slot_gen = inner.slot_generations.get(&id.0).copied().unwrap_or(0);
         inner.nodes[id.index()] = Some(Node {
             id,
+            generation: slot_gen,
             connected: false,
             parent: None,
             first_child: None,
@@ -1309,16 +1345,15 @@ impl DomTree {
     }
 
     pub fn get_element_by_id(&self, id: &str) -> Option<NodeId> {
-        let indexed = self.inner.borrow().id_index.get(id).copied();
-        if indexed.is_some_and(|node| self.containing_shadow_root(node).is_none()) {
-            return indexed;
+        // Empty string is not a valid id — browsers return null for
+        // getElementById("").
+        if id.is_empty() {
+            return None;
         }
-
-        // Creation happens before insertion, so the O(1) best-effort index can
-        // point at a shadow descendant. Never expose that node through
-        // document.getElementById; recover the first matching light-tree
-        // element in document order instead. Detached and template-content
-        // nodes retain the legacy best-effort lookup behavior used internally.
+        // Always do a tree-order scan to find the first element with this id
+        // in the document. The id_index is best-effort and doesn't reflect
+        // tree order after reparenting or when multiple elements share an
+        // id (the spec says the first in tree order wins).
         self.descendants(self.document()).into_iter().find(|node_id| {
             self.with_node(*node_id, |node| node.get_attribute("id") == Some(id))
                 .unwrap_or(false)
@@ -1640,6 +1675,7 @@ impl Default for DomTree {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn element(tree: &DomTree, local: &str) -> NodeId {

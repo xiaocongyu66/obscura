@@ -149,6 +149,26 @@ pub async fn handle(
             };
             emit_post_eval_nav(ctx, session_id).await?;
 
+            // Pump frames: attach pending iframes + deliver postMessages.
+            // Run advance_frames in a loop, with event loop pumps between
+            // each iteration so microtasks (from postMessage delivery)
+            // get processed before checking again.
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                for _ in 0..10 {
+                    // Pump event loop to process microtasks from previous delivery
+                    if let Some(js) = page.js.as_mut() {
+                        let _ = js.run_event_loop_for_duration(100).await;
+                    }
+                    if !page.advance_frames().await {
+                        break;
+                    }
+                }
+                // Final event loop pump to process microtasks from the last delivery
+                if let Some(js) = page.js.as_mut() {
+                    let _ = js.run_event_loop_for_duration(500).await;
+                }
+            }
+
             Ok(json!({ "result": remote_object_from_info(&info) }))
         }
         "callFunctionOn" => {
@@ -212,6 +232,26 @@ pub async fn handle(
                 }
             };
             emit_post_eval_nav(ctx, session_id).await?;
+
+            // Pump frames: attach pending iframes + deliver postMessages.
+            // Run advance_frames in a loop, with event loop pumps between
+            // each iteration so microtasks (from postMessage delivery)
+            // get processed before checking again.
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                for _ in 0..10 {
+                    // Pump event loop to process microtasks from previous delivery
+                    if let Some(js) = page.js.as_mut() {
+                        let _ = js.run_event_loop_for_duration(100).await;
+                    }
+                    if !page.advance_frames().await {
+                        break;
+                    }
+                }
+                // Final event loop pump to process microtasks from the last delivery
+                if let Some(js) = page.js.as_mut() {
+                    let _ = js.run_event_loop_for_duration(500).await;
+                }
+            }
 
             Ok(json!({ "result": remote_object_from_info(&info) }))
         }

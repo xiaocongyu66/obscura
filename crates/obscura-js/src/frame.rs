@@ -60,10 +60,26 @@ impl FrameRealm {
         url: &str,
         html: &str,
     ) -> Option<Self> {
+        Self::new_with_encoding(parent, frame_id, parent_frame_id, url, html, None)
+    }
+
+    /// `encoding`:iframe 文档自身的字符编码名(WHATWG canonical name)。
+    /// `share_resources_with` 先继承父页编码,这里用 frame 自己的编码覆盖——
+    /// 一个 GBK 父页里的 UTF-8 iframe(或反过来)必须各用各的解码结果,
+    /// document.characterSet / URL query 序列化才正确。
+    pub fn new_with_encoding(
+        parent: &mut ObscuraJsRuntime,
+        frame_id: u32,
+        parent_frame_id: u32,
+        url: &str,
+        html: &str,
+        encoding: Option<&str>,
+    ) -> Option<Self> {
         let context = parent.create_realm_context()?;
         if !parent.share_ops_with_realm(&context) {
             return None;
         }
+        parent.share_global_constructors_with_realm(&context);
         parent.copy_identity_to_realm(&context);
 
         // Only a same-origin frame is reachable from the page. Cross-origin
@@ -77,10 +93,32 @@ impl FrameRealm {
         }
 
         let mut state = ObscuraState::new();
-        state.dom = Some(parse_html(html));
+        // Use XML parser for .xml/.xhtml URLs or application/xml content;
+        // HTML5 parser for everything else.
+        let is_xml = url.ends_with(".xml")
+            || url.ends_with(".xhtml")
+            || url.ends_with(".xht")
+            || url.contains("application/xml")
+            || url.contains("text/xml")
+            || html.trim_start().starts_with("<?xml");
+        let dom = if is_xml {
+            obscura_dom::parse_xml(html)
+        } else {
+            parse_html(html)
+        };
+        // :target 匹配依赖 DomTree 里的文档 URL(取 fragment)。这里同步
+        // 一次,frame 的第一次查询就能拿到;后续 URL 变化由 document_url
+        // op 懒同步。
+        dom.set_document_url(url);
+        state.dom = Some(dom);
         state.url = url.to_string();
         state.frame_id = frame_id;
         parent.share_resources_with(&mut state);
+        if let Some(enc) = encoding {
+            if !enc.is_empty() {
+                state.encoding = enc.to_string();
+            }
+        }
 
         let realms = parent.realm_states();
         realms.borrow_mut().register(
@@ -142,6 +180,12 @@ impl FrameRealm {
     }
 
     /// Delivers a `postMessage` that another realm sent to this one.
+    ///
+    /// `execute_script` (not `evaluate`) is intentional: `evaluate` wraps its
+    /// expression in `JSON.stringify(...)`, which turns
+    /// `__obscura_deliverMessage(...); null` into a syntax error and the
+    /// dispatchEvent callbacks never fire. We don't need a return value, so a
+    /// plain script is the correct tool.
     pub fn deliver_message(
         &self,
         parent: &mut ObscuraJsRuntime,

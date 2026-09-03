@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use obscura_dom::{parse_html, DomTree};
+use obscura_dom::{parse_html, parse_xml, DomTree};
 use obscura_js::frame::FrameRealm;
 use obscura_js::runtime::ObscuraJsRuntime;
 use obscura_net::{
@@ -296,7 +296,11 @@ pub struct Page {
 
 const MAX_STYLESHEET_IMPORT_DEPTH: u8 = 4;
 const MAX_STYLESHEET_RESOURCES: usize = 128;
-const DEFAULT_NAVIGATION_TIMEOUT_MS: u64 = 30_000;
+// 120s:Next.js/Turbopack SPA 冷启动(89 个 chunk,5MB+)在移动网络下
+// execute_scripts 需 45s+;tokio::time::timeout 超时会 drop 导航 future,
+// 把 execute_scripts 一起中断(x.ai 89 脚本只跑 44 个,水合 chunk 缺失)。
+// 原默认 30s 是同步页时代定的;快速页不受影响(提前完成即返回)。
+const DEFAULT_NAVIGATION_TIMEOUT_MS: u64 = 120_000;
 
 /// How many child frame realms one document may hold at once.
 ///
@@ -877,6 +881,20 @@ fn inline_stylesheet_import_requests(dom: &DomTree) -> Vec<(usize, StylesheetImp
 
 impl Page {
     pub fn new(id: String, context: Arc<BrowserContext>) -> Self {
+        Self::new_with_fingerprint(id, context, crate::fingerprint::Fingerprint::random())
+    }
+
+    /// Creates a page pinned to a specific fingerprint. Two pages in the same
+    /// session should pass the same `Fingerprint` so canvas/audio noise stays
+    /// stable across navigations; two sessions should pass different ones so
+    /// their hashes diverge. The fingerprint's `injection_script` is installed
+    /// as a preload script (runs before any page script via
+    /// `Page.addScriptToEvaluateOnNewDocument` semantics).
+    pub fn new_with_fingerprint(
+        id: String,
+        context: Arc<BrowserContext>,
+        fingerprint: crate::fingerprint::Fingerprint,
+    ) -> Self {
         let http_client = context.http_client.clone();
         // Chromium convention: the main frame's frameId == the targetId.
         // Playwright's frame manager looks up the main frame by targetId
@@ -899,6 +917,11 @@ impl Page {
         } else {
             None
         };
+
+        // Generate the fingerprint injection script from the caller-supplied
+        // fingerprint. Falls back to a random one in `Page::new`.
+        let fp_script = fingerprint.injection_script();
+        let cdp_hardening = crate::cdp_hardening::cdp_hardening_script();
 
         Page {
             id,
@@ -927,11 +950,11 @@ impl Page {
             response_bodies: std::collections::HashMap::new(),
             response_body_order: std::collections::VecDeque::new(),
             network_event_counter: 0,
+            preload_scripts: vec![cdp_hardening, fp_script],
             intercept_enabled: false,
             intercept_block_patterns: Vec::new(),
             blocked_url_patterns: Vec::new(),
             intercept_tx: None,
-            preload_scripts: Vec::new(),
             suspended_started_script_ids: Vec::new(),
             callbacks: Arc::new(CallbackRegistry::new()),
             #[cfg(feature = "stealth")]
@@ -984,7 +1007,7 @@ impl Page {
             return false;
         }
 
-        for frame in pending {
+        for mut frame in pending {
             // A realm is a live v8::Context plus a DOM tree, and the page realm
             // holds its window and document, so nothing here can be collected
             // while the document lives. Frames are released when the document
@@ -1001,8 +1024,60 @@ impl Page {
                 self.forget_frame_references(frame.frame_id, frame.parent_frame_id);
                 continue;
             }
+            // iframe 文档导航(浏览器语义):文档由网络栈加载,带 cookies、
+            // Sec-Fetch-Dest: iframe,响应不做 CORS 检查。JS 的
+            // fetch(mode:'no-cors') 拿不到跨域响应体(opaque),所以跨域
+            // frame 的内容必须由宿主取。
+            if frame.needs_host_fetch {
+                if frame.url == "about:blank" {
+                    frame.html = "<!DOCTYPE html><html><head></head><body></body></html>".into();
+                } else {
+                    let Ok(parsed) = Url::parse(&frame.url) else {
+                        self.forget_frame_references(frame.frame_id, frame.parent_frame_id);
+                        continue;
+                    };
+                    if self.should_block_url(&frame.url) {
+                        self.forget_frame_references(frame.frame_id, frame.parent_frame_id);
+                        continue;
+                    }
+                    match self.do_fetch(&parsed).await {
+                        Ok(response) => {
+                            // 按 frame 自己的 Content-Type/meta charset 解码
+                            // (GBK/Big5/Shift_JIS 等),不能对全页 lossy 硬解
+                            let (text, enc) = obscura_net::decode_response_with_name(
+                                &response.body,
+                                response.content_type(),
+                            );
+                            frame.html = text;
+                            frame.encoding = enc.to_string();
+                        }
+                        Err(error) => {
+                            tracing::warn!("frame document {} failed: {}", frame.url, error);
+                            self.forget_frame_references(frame.frame_id, frame.parent_frame_id);
+                            continue;
+                        }
+                    }
+                }
+            }
             let realm = match self.js.as_mut().and_then(|js| {
-                FrameRealm::new(js, frame.frame_id, frame.parent_frame_id, &frame.url, &frame.html)
+                if frame.encoding.is_empty() {
+                    FrameRealm::new(
+                        js,
+                        frame.frame_id,
+                        frame.parent_frame_id,
+                        &frame.url,
+                        &frame.html,
+                    )
+                } else {
+                    FrameRealm::new_with_encoding(
+                        js,
+                        frame.frame_id,
+                        frame.parent_frame_id,
+                        &frame.url,
+                        &frame.html,
+                        Some(&frame.encoding),
+                    )
+                }
             }) {
                 Some(realm) => realm,
                 None => {
@@ -1028,7 +1103,14 @@ impl Page {
                 }
                 match self.do_fetch(&parsed).await {
                     Ok(response) => {
-                        sources.insert(url, String::from_utf8_lossy(&response.body).into_owned());
+                        // 脚本是 HTML(经典脚本按文档编码族解码):响应带
+                        // charset 头就用它,否则按 frame 编码/UTF-8 兜底,
+                        // 不 lossy 硬解。
+                        let decoded = obscura_net::decode_non_html(
+                            &response.body,
+                            response.content_type(),
+                        );
+                        sources.insert(url, decoded);
                     }
                     Err(error) => {
                         tracing::warn!("frame script {} failed: {}", url, error);
@@ -1061,6 +1143,30 @@ impl Page {
                 if let Err(error) = realm.dispatch_load_events(js) {
                     tracing::debug!("frame {} load events failed: {error}", frame.url);
                 }
+                // 宿主取回文档并建好 realm 之后,才给父页面里的 iframe 元素
+                // 派发 load(_loadIframeSrc 在排队时不能发:文档还没取回,
+                // 父页的 init 会在空文档上跑,querySelector-All 套件就是这么
+                // 挂的)。
+                if frame.needs_host_fetch {
+                    // 递减 _loadIframeSrc 排队时加的 load-delaying 计数
+                    // (iframe 是阻塞 window load 的资源),再给父页的
+                    // iframe 元素派发 load。
+                    let notify = format!(
+                        "try {{ var __el = globalThis.__obscura_frameElements[{frame_id}];\
+                         if (__el) {{\
+                           if (__el._iframeLoadDelay) {{\
+                             __el._iframeLoadDelay = false;\
+                             if (typeof __dynLoadDelayingPending === 'number' && __dynLoadDelayingPending > 0) __dynLoadDelayingPending--;\
+                           }}\
+                           __el.dispatchEvent(new Event('load', \
+                           {{ bubbles: false, cancelable: false }}));\
+                         }} }} catch (_) {{}}",
+                        frame_id = frame.frame_id,
+                    );
+                    if let Err(error) = js.execute_script("<frame-load-notify>", &notify) {
+                        tracing::debug!("frame {} parent load notify failed: {error}", frame.url);
+                    }
+                }
             }
             self.frames.push(realm);
         }
@@ -1072,7 +1178,7 @@ impl Page {
     /// Reports whether anything was delivered, because a message usually causes
     /// a reply: a widget posts its result, the page answers, and the exchange
     /// only finishes if the caller settles and drains again.
-    fn deliver_frame_messages(&mut self) -> bool {
+    async fn deliver_frame_messages(&mut self) -> bool {
         let pending = match self.js.as_ref() {
             Some(js) => js.take_pending_frame_messages(),
             None => return false,
@@ -1087,12 +1193,12 @@ impl Page {
             if message.target_frame_id == 0 {
                 let Some(js) = self.js.as_mut() else { continue };
                 let script = format!(
-                    "globalThis.__obscura_deliverMessage({escaped_data}, {escaped_origin}, {});",
+                    "globalThis.__obscura_deliverMessage({escaped_data}, {escaped_origin}, {})",
                     message.source_frame_id,
                 );
-                if let Err(error) = js.execute_script("<frame-message>", &script) {
-                    tracing::debug!("message to the page failed: {error}");
-                }
+                // Use evaluate_for_cdp which properly enters the page's V8 context
+                // and runs the event loop so dispatchEvent callbacks fire.
+                let _ = js.evaluate_for_cdp(&script, true, false).await;
                 continue;
             }
 
@@ -1246,9 +1352,9 @@ impl Page {
     /// Reports whether anything happened, so a caller can pump again. A new
     /// frame runs scripts that can post, and a message usually causes a reply,
     /// so neither queue is finished until both are quiet.
-    async fn advance_frames(&mut self) -> bool {
+    pub async fn advance_frames(&mut self) -> bool {
         let attached = self.attach_pending_frames().await;
-        let delivered = self.deliver_frame_messages();
+        let delivered = self.deliver_frame_messages().await;
         self.release_detached_frames();
         attached || delivered
     }
@@ -1741,14 +1847,14 @@ impl Page {
     async fn drive_load_delaying_scripts(
         js: &mut ObscuraJsRuntime,
         deadline: tokio::time::Instant,
-    ) -> bool {
+    ) -> Result<bool, String> {
         while js.has_pending_load_delaying_scripts() {
             let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
             else {
-                return false;
+                return Ok(false);
             };
             if remaining.is_zero() {
-                return false;
+                return Ok(false);
             }
             let poll_budget = remaining.min(tokio::time::Duration::from_millis(25));
             match tokio::time::timeout(
@@ -1763,8 +1869,9 @@ impl Page {
                     }
                 }
                 Ok(Err(error)) => {
-                    tracing::warn!("load-delaying dynamic script event loop failed: {error}");
-                    return false;
+                    return Err(format!(
+                        "load-delaying dynamic script event loop failed: {error}"
+                    ));
                 }
                 Err(_) => {
                     // This timeout only cancels a parked event-loop poll. The
@@ -1772,7 +1879,7 @@ impl Page {
                 }
             }
         }
-        true
+        Ok(true)
     }
 
     async fn execute_scripts_with_module_budget(&mut self, module_budget_override: Option<u64>) {
@@ -1798,7 +1905,7 @@ impl Page {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(30_000);
-        let script_deadline =
+        let mut script_deadline =
             tokio::time::Instant::now() + tokio::time::Duration::from_millis(script_deadline_ms);
 
         // Hard backstop over the WHOLE script-execution phase. Inline scripts
@@ -2036,21 +2143,31 @@ impl Page {
         // 16 is well above the per-host pool ceiling most browsers use
         // and matches what real Chrome does for a given origin.
         use futures::StreamExt as _;
-        let fetch_stream = futures::stream::iter(fetch_futures).buffer_unordered(16);
-        let fetch_results = match tokio::time::timeout_at(
-            script_deadline,
-            fetch_stream.collect::<Vec<_>>(),
-        )
-        .await
-        {
-            Ok(results) => results,
-            Err(_) => {
-                tracing::warn!(
-                    "execute_scripts: fetch deadline reached, some scripts may not have loaded"
-                );
-                Vec::new()
+        let mut fetch_stream = futures::stream::iter(fetch_futures).buffer_unordered(16);
+        // Servo 对齐(htmlscriptelement.rs fetch_a_classic_script → 队列驱动,
+        // 无总预算):deadline 只兜底"完全无进展" —— 每收到一个响应就顺延,
+        // 慢网络的后续脚本不因前面的耗时被连坐丢弃(此前 collect 超时会把
+        // 已完成的响应一起丢掉,Next.js 89 个 chunk 只剩前 14 个可执行)。
+        let mut fetch_results: Vec<Option<(usize, String, obscura_net::Response)>> = Vec::new();
+        let mut last_progress = tokio::time::Instant::now();
+        loop {
+            let no_progress_deadline = last_progress + tokio::time::Duration::from_millis(script_deadline_ms);
+            match tokio::time::timeout_at(no_progress_deadline, fetch_stream.next()).await {
+                Ok(Some(result)) => {
+                    fetch_results.push(result);
+                    last_progress = tokio::time::Instant::now();
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!(
+                        "execute_scripts: no fetch progress for {}ms, {} results kept",
+                        script_deadline_ms,
+                        fetch_results.len()
+                    );
+                    break;
+                }
             }
-        };
+        }
 
         let mut fetched: std::collections::HashMap<usize, (String, String, obscura_net::Response)> =
             std::collections::HashMap::new();
@@ -2179,8 +2296,10 @@ impl Page {
                 .max(1)
                 .min(u128::from(u64::MAX)) as u64
         };
+        // deadline 会在执行循环里顺延(进展驱动),用 Cell 让闭包与循环共享。
+        let script_deadline_cell = std::cell::Cell::new(script_deadline);
         let evaluation_budget_ms = |remaining_active_ms: u64| -> Option<u64> {
-            let remaining_page_ms = remaining_budget_ms(script_deadline)?;
+            let remaining_page_ms = remaining_budget_ms(script_deadline_cell.get())?;
             let budget = remaining_active_ms
                 .saturating_add(module_hostcall_grace_ms)
                 .min(remaining_page_ms);
@@ -2207,14 +2326,14 @@ impl Page {
                         if let Some(js) = &mut page.js {
                             let _ = js.execute_script(
                                 "<current-script>",
-                                &format!("globalThis.__currentScriptNid={};", script.nid),
+                                &format!("globalThis.__prevCS = [globalThis.__currentScriptNid, globalThis.__currentScriptSync === true]; _pushCurrentScript({});", script.nid),
                             );
                             if let Err(error) = js.execute_script_guarded(&execution_url, &code) {
                                 tracing::warn!("Script error ({}): {}", execution_url, error);
                             }
                             let _ = js.execute_script(
                                 "<current-script>",
-                                "globalThis.__currentScriptNid=0;",
+                                "globalThis.__currentScriptNid = globalThis.__prevCS ? globalThis.__prevCS[0] : 0; globalThis.__currentScriptSync = globalThis.__prevCS ? globalThis.__prevCS[1] : false; globalThis.__prevCS = null;",
                             );
                         }
                     }
@@ -2222,15 +2341,17 @@ impl Page {
                     if let Some(js) = &mut page.js {
                         let _ = js.execute_script(
                             "<current-script>",
-                            &format!("globalThis.__currentScriptNid={};", script.nid),
+                            &format!("globalThis.__prevCS = [globalThis.__currentScriptNid, globalThis.__currentScriptSync === true]; _pushCurrentScript({});", script.nid),
                         );
                         if let Err(error) =
                             js.execute_script_guarded(&script.base_url, &script.inline)
                         {
                             tracing::warn!("Inline script error: {}", error);
                         }
-                        let _ = js
-                            .execute_script("<current-script>", "globalThis.__currentScriptNid=0;");
+                        let _ = js.execute_script(
+                            "<current-script>",
+                            "globalThis.__currentScriptNid = globalThis.__prevCS ? globalThis.__prevCS[0] : 0; globalThis.__currentScriptSync = globalThis.__prevCS ? globalThis.__prevCS[1] : false; globalThis.__prevCS = null;",
+                        );
                     }
                 }
             };
@@ -2241,7 +2362,7 @@ impl Page {
         // register at their exact position; module graphs start there too, but
         // evaluation of non-async modules remains post-parse.
         for (index, script) in all_scripts.iter().enumerate() {
-            if tokio::time::Instant::now() >= script_deadline {
+            if tokio::time::Instant::now() >= script_deadline_cell.get() {
                 tracing::warn!(
                     "execute_scripts: deadline reached, skipping {} remaining scripts",
                     all_scripts.len() - index,
@@ -2262,6 +2383,13 @@ impl Page {
                     }
                 }
                 ScriptKind::Classic => {
+                    // Servo 对齐:管线是队列驱动、无总预算。deadline 只防单点
+                    // 挂死 —— 每处理完一个脚本都顺延,慢网络的后续脚本不因
+                    // 前面耗时被连坐跳过(Next.js 89 个 chunk 曾只跑 14 个)。
+                    script_deadline_cell.set(
+                        tokio::time::Instant::now()
+                            + tokio::time::Duration::from_millis(script_deadline_ms),
+                    );
                     if script.is_defer && !script.is_async && script.src.is_some() {
                         post_parse.push(ScheduledScript::Classic(index));
                     } else {
@@ -2270,10 +2398,14 @@ impl Page {
                     }
                 }
                 ScriptKind::Module => {
+                    script_deadline_cell.set(
+                        tokio::time::Instant::now()
+                            + tokio::time::Duration::from_millis(script_deadline_ms),
+                    );
                     // Graph loading and evaluation share one active-work
                     // allowance. Queue time behind other post-parse scripts is
                     // not work performed by this module.
-                    let Some(remaining_page_ms) = remaining_budget_ms(script_deadline) else {
+                    let Some(remaining_page_ms) = remaining_budget_ms(script_deadline_cell.get()) else {
                         tracing::warn!("ES module budget exhausted before graph preparation");
                         continue;
                     };
@@ -2430,7 +2562,10 @@ impl Page {
         }
 
         for scheduled in post_parse {
-            if tokio::time::Instant::now() >= script_deadline {
+            script_deadline_cell.set(
+                tokio::time::Instant::now() + tokio::time::Duration::from_millis(script_deadline_ms),
+            );
+            if tokio::time::Instant::now() >= script_deadline_cell.get() {
                 tracing::warn!("execute_scripts: deadline reached during post-parse scripts");
                 break;
             }
@@ -2494,35 +2629,75 @@ impl Page {
             }
         }
 
-        if let Some(js) = &mut self.js {
-            // DOMContentLoaded follows parser/defer/module work, but async
-            // dynamic script elements do not gate it. They do remain in the
-            // document's load-event delay set, including scripts inserted by
-            // a DOMContentLoaded listener.
-            let _ = js.execute_script(
-                "<dom-content-loaded>",
-                "try { document.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n\
-                 try { window.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}",
-            );
+        // 先驱动一次 frame 前进:解析期排队的 iframe 宿主 fetch 若已完成,
+        // 在这里建 realm、派发元素 load、递减 load-delaying 计数,这样后面
+        // 的 window load 事件就带着完整的 frame 状态触发(真实浏览器:iframe
+        // 是阻塞 load 的资源)。
+        self.advance_frames().await;
+        // Servo 的 LoadBlocker 模式:每个阻塞 load 的资源(script/iframe)
+        // 持有一个计数;计数归零才触发 window load。iframe 的取回完成需要
+        // advance_frames(&mut self),所以循环按阶段推进:
+        //   [pump frames] → [借 js 驱动到 idle] → 计数未归零则回到开头。
+        // Servo 的 LoadBlocker 模式:iframe 与脚本一样持有 load-blocking
+        // 计数;计数归零才触发 window load。阶段交替推进:
+        //   [advance_frames:建 realm、派发元素 load、递减计数]
+        //   → [借 js pump 事件循环到 idle] → 计数未归零则回到开头。
+        let mut idle_rounds: u32 = 0;
+        loop {
+            self.advance_frames().await;
 
-            let load_blockers_finished =
-                Self::drive_load_delaying_scripts(js, script_deadline).await;
-            if !load_blockers_finished {
+            let pending = {
+                let Some(js) = &mut self.js else { break };
+                let _ = js.execute_script(
+                    "<dom-content-loaded>",
+                    "try { document.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n\
+                     try { window.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}",
+                );
+                // 事件循环 pump 到 idle(短预算:让 fetch/timer 走完一小步)
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    js.run_load_delaying_event_loop_tick(),
+                ).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::debug!("event loop tick failed: {e}"),
+                    Err(_) => {}
+                }
+                js.has_pending_load_delaying_scripts()
+            };
+
+            if !pending {
+                if let Some(js) = &mut self.js {
+                    let _ = js.execute_script(
+                        "<load-event>",
+                        "globalThis.__documentReadyState__ = 'complete';\n\
+                         if (typeof window.onload === 'function') { try { window.onload(); } catch(e) {} }\n\
+                         try { window.dispatchEvent(new Event('load', {bubbles:false,cancelable:false})); } catch(e) {}",
+                    );
+                }
+                break;
+            }
+
+            // 计数未归零:若 frame 侧连续几轮无新工作,继续等没有意义,
+            // 放弃阻塞直接触发 load。
+            let frame_work = self.advance_frames().await;
+            idle_rounds = if frame_work { 0 } else { idle_rounds.saturating_add(1) };
+            if idle_rounds >= 8 {
                 tracing::warn!(
                     "script deadline reached with load-delaying dynamic scripts still pending"
                 );
+                if let Some(js) = &mut self.js {
+                    let _ = js.execute_script(
+                        "<load-event>",
+                        "globalThis.__documentReadyState__ = 'complete';\n\
+                         if (typeof window.onload === 'function') { try { window.onload(); } catch(e) {} }\n\
+                         try { window.dispatchEvent(new Event('load', {bubbles:false,cancelable:false})); } catch(e) {}",
+                    );
+                }
+                break;
             }
-
-            // readyState becomes complete before the load event. A script
-            // inserted by an onload handler is therefore post-load work and
-            // remains pending until an explicit caller settle/wait.
-            let _ = js.execute_script(
-                "<load-event>",
-                "globalThis.__documentReadyState__ = 'complete';\n\
-                 if (typeof window.onload === 'function') { try { window.onload(); } catch(e) {} }\n\
-                 try { window.dispatchEvent(new Event('load', {bubbles:false,cancelable:false})); } catch(e) {}",
-            );
         }
+        // load 事件后再驱动一轮 frame(iframe onload 里创建的嵌套 frame 等)
+        self.advance_frames().await;
         if let Some(token) = exec_wd {
             if let Some(js) = self.js.as_mut() {
                 js.disarm_watchdog(token);
@@ -2913,7 +3088,16 @@ impl Page {
         let (body_text, encoding_name) =
             obscura_net::decode_response_with_name(&response.body, response.content_type());
         self.encoding = encoding_name.to_string();
-        let dom = parse_html(&body_text);
+        // Use XML parser for XML/XHTML content types; HTML5 parser for
+        // everything else. XML is strict (well-formedness errors stop
+        // parsing), HTML5 is permissive.
+        let content_type = response.content_type().unwrap_or_default();
+        let is_xml = content_type.contains("xml") || content_type.contains("xhtml");
+        let dom = if is_xml {
+            parse_xml(&body_text)
+        } else {
+            parse_html(&body_text)
+        };
 
         self.title = dom
             .query_selector("title")
@@ -3526,6 +3710,13 @@ impl Page {
 
     /// Move network events recorded for script-initiated requests
     /// (fetch/XHR/dynamic resource) from the JS runtime into this page's
+    /// Returns a snapshot clone of all captured network events. Used by
+    /// the MCP `network_capture_stop` tool so a caller can dump the traffic
+    /// observed on a tab without poking at internal fields.
+    pub fn network_events_snapshot(&self) -> Vec<NetworkEvent> {
+        self.network_events.clone()
+    }
+
     /// network_events, so the CDP layer emits Network.requestWillBeSent /
     /// responseReceived for them (issue #406). Idempotent: the runtime's queue
     /// is drained, so calling this repeatedly does not duplicate events. The
@@ -5596,7 +5787,7 @@ mod tests {
         let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(125);
 
-        let completed = super::Page::drive_load_delaying_scripts(
+        let completed = page.drive_load_delaying_scripts(
             page.js.as_mut().unwrap(),
             deadline,
         )

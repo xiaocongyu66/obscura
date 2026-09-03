@@ -5,9 +5,11 @@ pub mod tree;
 pub mod tree_sink;
 pub mod selector;
 pub mod serialize;
+pub mod xml_parser;
 
 pub use tree::{
     AttachShadowError, Attribute, DomTree, Node, NodeData, NodeId, ShadowRoot,
     ShadowRootMode,
 };
 pub use tree_sink::{parse_fragment, parse_fragment_with_context, parse_html};
+pub use xml_parser::parse_xml;
