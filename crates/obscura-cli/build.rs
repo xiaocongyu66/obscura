@@ -50,13 +50,25 @@ fn link_boringssl_statics() {
         .map(|v| v.into())
         .unwrap_or_else(|_| "target".to_string());
     let target = env::var("TARGET").unwrap_or_default();
-    let build_root = env::current_dir()
-        .ok()
-        .map(|d| d.parent().map(|p| p.to_path_buf()))
-        .flatten()
-        .unwrap_or_else(|| env::current_dir().expect("cwd"))
-        .join(&target_dir);
-    let glob = build_root.join(&target).join("release").join("build");
+    // build.rs 的 cwd = crate 目录(crates/obscura-cli);workspace 根在其上两级
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| env::current_dir().expect("cwd"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| manifest_dir.clone());
+    let build_root = if workspace_root.join(&target_dir).exists() {
+        workspace_root.join(&target_dir)
+    } else {
+        workspace_root
+    };
+    let glob = build_root
+        .join(&target)
+        .join("release")
+        .join("build");
+    eprintln!("link_boringssl_statics: glob={}", glob.display());
     let mut found: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&glob) {
         for entry in entries.flatten() {
