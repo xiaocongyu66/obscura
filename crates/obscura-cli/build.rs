@@ -68,7 +68,7 @@ fn link_boringssl_statics() {
         .join(&target)
         .join("release")
         .join("build");
-    eprintln!("link_boringssl_statics: glob={}", glob.display());
+    println!("cargo:warning=link_boringssl_statics: glob={}", glob.display());
     let mut found: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&glob) {
         for entry in entries.flatten() {
@@ -89,6 +89,7 @@ fn link_boringssl_statics() {
     // 链接顺序:libssl.a 依赖 libcrypto.a,ssl 在前
     found.sort_by_key(|p| if p.file_name().unwrap() == "libssl.a" { 0 } else { 1 });
     for lib in found {
+        println!("cargo:warning=linking {}", lib.display());
         println!("cargo:rustc-link-arg={}", lib.display());
     }
 }
