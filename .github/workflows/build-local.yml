@@ -34,26 +34,22 @@ jobs:
           if-no-files-found: error
 
   build-android-aarch64:
-    name: Termux aarch64 (linux-gnu cross)
+    name: Termux aarch64 (zigbuild cross)
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install Rust + aarch64 gnu target
+      - name: Install Rust + aarch64 gnu target + zigbuild
         run: |
           rustup toolchain install stable --profile minimal
           rustup target add aarch64-unknown-linux-gnu
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-      - name: Build (stealth, aarch64 gnu)
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-        run: cargo build --release --target aarch64-unknown-linux-gnu -p obscura-cli --features stealth
+          pip3 install --quiet cargo-zigbuild==0.19.7 || pip3 install cargo-zigbuild
+          cargo zigbuild --version
+      - name: Build (stealth, aarch64 gnu via zig)
+        run: |
+          cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
