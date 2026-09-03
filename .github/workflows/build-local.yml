@@ -83,6 +83,15 @@ jobs:
           nm "$LIBCRYPTO" 2>/dev/null | grep -c "CRYPTO_library_init" || true
           echo "=== file size check:"
           ls -la "$LIBSSL" "$LIBCRYPTO"
+          echo "=== try redefine manually on a copy:"
+          cp "$LIBSSL" /tmp/ssl-test.a
+          head -2 "$OUT/redefine_syms.txt" > /tmp/rd.txt 2>/dev/null || echo "no rd file"
+          wc -l "$OUT/redefine_syms.txt" 2>/dev/null || true
+          objcopy --redefine-syms="$OUT/redefine_syms.txt" /tmp/ssl-test.a && echo "objcopy OK" || echo "objcopy FAILED"
+          echo "=== after manual redefine, SSL_read count:"
+          nm /tmp/ssl-test.a 2>/dev/null | grep -c "SSL_read" || true
+          echo "=== after manual redefine, prefixed count:"
+          nm /tmp/ssl-test.a 2>/dev/null | grep -c "build_script_main_SSL_read" || true
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
