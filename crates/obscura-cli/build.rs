@@ -64,32 +64,41 @@ fn link_boringssl_statics() {
     } else {
         workspace_root
     };
-    let glob = build_root
-        .join(&target)
-        .join("release")
-        .join("build");
+    let glob = build_root.join(&target).join("release").join("build");
     println!("cargo:warning=link_boringssl_statics: glob={}", glob.display());
     let mut found: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&glob) {
-        for entry in entries.flatten() {
-            let out = entry.path().join("out");
-            if !entry.file_name().to_string_lossy().contains("btls-sys") || !out.exists() {
-                continue;
-            }
-            for sub in ["build/lib", "build/ssl", "build/crypto", "build", "lib"] {
-                for lib in ["libssl.a", "libcrypto.a"] {
-                    let p = out.join(sub).join(lib);
-                    if p.exists() && !found.contains(&p) {
-                        found.push(p);
-                    }
+    let entries = match std::fs::read_dir(&glob) {
+        Ok(e) => e,
+        Err(e) => {
+            println!("cargo:warning=link_boringssl_statics: read_dir failed: {e}");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let out = entry.path().join("out");
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.contains("btls-sys") {
+            continue;
+        }
+        println!(
+            "cargo:warning=link_boringssl_statics: candidate={name} out_exists={}",
+            out.exists()
+        );
+        for sub in ["build/lib", "build/ssl", "build/crypto", "build", "lib"] {
+            for lib in ["libssl.a", "libcrypto.a"] {
+                let p = out.join(sub).join(lib);
+                if p.exists() && !found.contains(&p) {
+                    found.push(p);
                 }
             }
         }
     }
     // 链接顺序:libssl.a 依赖 libcrypto.a,ssl 在前
-    found.sort_by_key(|p| if p.file_name().unwrap() == "libssl.a" { 0 } else { 1 });
+    found.sort_by_key(|p| {
+        if p.file_name().unwrap() == "libssl.a" { 0 } else { 1 }
+    });
+    println!("cargo:warning=link_boringssl_statics: found={}", found.len());
     for lib in found {
-        println!("cargo:warning=linking {}", lib.display());
         println!("cargo:rustc-link-arg={}", lib.display());
     }
 }
