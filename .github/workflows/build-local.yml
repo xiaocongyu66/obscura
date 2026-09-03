@@ -54,7 +54,11 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ github.workspace }}/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang
           AR: ${{ github.workspace }}/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-        run: cargo build --release --target aarch64-linux-android -p obscura-cli --features stealth
+          CC_aarch64_linux_android: ${{ github.workspace }}/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang
+          CXX_aarch64_linux_android: ${{ github.workspace }}/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang++
+        run: >
+          export PATH="$PWD/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" &&
+          cargo build --release --target aarch64-linux-android -p obscura-cli --features stealth
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
