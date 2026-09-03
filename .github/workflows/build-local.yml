@@ -55,6 +55,23 @@ jobs:
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
           cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth
+      - name: Diagnose btls symbols (on failure)
+        if: failure()
+        run: |
+          OUT=$(find target/aarch64-unknown-linux-gnu/release/build -maxdepth 3 -type d -name out -path "*btls*" | head -1)
+          echo "OUT=$OUT"
+          find "$OUT" -name "libcrypto.a" -o -name "libssl.a" 2>/dev/null
+          LIB=$(find "$OUT" -name "libcrypto.a" | head -1)
+          if [ -n "$LIB" ]; then
+            echo "--- unprefixed SSL_read occurrences:"
+            nm "$LIB" 2>/dev/null | grep -c " SSL_read" || true
+            echo "--- prefixed SSL_read occurrences:"
+            nm "$LIB" 2>/dev/null | grep -c "build_script_main_SSL_read" || true
+            echo "--- redefine_syms.txt head:"
+            head -3 "$OUT/redefine_syms.txt" 2>/dev/null || echo "NO redefine_syms.txt"
+          else
+            echo "NO libcrypto.a found in btls out dir"
+          fi
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
