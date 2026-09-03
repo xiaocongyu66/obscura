@@ -54,15 +54,15 @@ jobs:
       - name: Build (stealth, aarch64 gnu via zig)
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
-          # 第一步:先单独构建 btls-sys(触发 cmake 编 boringssl),让 .a 落盘
-          cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p btls-sys
-          # 第二步:找到 .a,以绝对路径经 RUSTFLAGS 注入最终链接
+          # 第一次构建:链接会失败(btls -l 丢失),但 cmake 会编出 boringssl .a
+          cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth || true
           LIBSSL=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libssl.a" | head -1)
           LIBCRYPTO=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libcrypto.a" | head -1)
           echo "LIBSSL=$LIBSSL LIBCRYPTO=$LIBCRYPTO"
           test -n "$LIBSSL" && test -n "$LIBCRYPTO"
-          export RUSTFLAGS="-C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO"
-          cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth
+          # 第二次:rustc 额外参数变化只触发重链(rlib 全部复用缓存)
+          cargo zigbuild rustc --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth --bin obscura -- -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO
+          cargo zigbuild rustc --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth --bin obscura-worker -- -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO
       - name: Diagnose btls symbols (on failure)
         if: failure()
         run: |
