@@ -54,6 +54,8 @@ jobs:
       - name: Build (stealth, aarch64 gnu via zig)
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
+          # btls-sys 的 -l static 在交叉链接时不展开:显式按绝对路径链 .a
+          export OBSCURA_LINK_BORINGSSL_EXPLICIT=1
           cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth
       - name: Diagnose btls symbols (on failure)
         if: failure()
