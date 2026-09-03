@@ -71,16 +71,18 @@ jobs:
           echo "OUT=$OUT"
           find "$OUT" -name "libcrypto.a" -o -name "libssl.a" 2>/dev/null
           LIB=$(find "$OUT" -name "libcrypto.a" | head -1)
-          if [ -n "$LIB" ]; then
-            echo "--- unprefixed SSL_read occurrences:"
-            nm "$LIB" 2>/dev/null | grep -c " SSL_read" || true
-            echo "--- prefixed SSL_read occurrences:"
-            nm "$LIB" 2>/dev/null | grep -c "build_script_main_SSL_read" || true
-            echo "--- redefine_syms.txt head:"
-            head -3 "$OUT/redefine_syms.txt" 2>/dev/null || echo "NO redefine_syms.txt"
-          else
-            echo "NO libcrypto.a found in btls out dir"
-          fi
+          LIBSSL=$(find "$OUT" -name "libssl.a" | head -1)
+          echo "=== nm libssl.a first 15 defined symbols:"
+          nm "$LIBSSL" 2>/dev/null | grep " T " | head -15
+          echo "=== SSL_read in libssl.a:"
+          nm "$LIBSSL" 2>/dev/null | grep -c "SSL_read" || true
+          LIBCRYPTO=$(find "$OUT" -name "libcrypto.a" | head -1)
+          echo "=== nm libcrypto.a first 10 defined symbols:"
+          nm "$LIBCRYPTO" 2>/dev/null | grep " T " | head -10
+          echo "=== CRYPTO_library_init in libcrypto.a:"
+          nm "$LIBCRYPTO" 2>/dev/null | grep -c "CRYPTO_library_init" || true
+          echo "=== file size check:"
+          ls -la "$LIBSSL" "$LIBCRYPTO"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
