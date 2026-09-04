@@ -34,43 +34,29 @@ jobs:
           if-no-files-found: error
 
   build-linux-arm64:
-    name: Linux arm64 (cross)
-    runs-on: ubuntu-22.04
+    name: Linux arm64 (native)
+    # 必须原生 arm64 runner:build.rs 交叉编译时找不到 cross-mksnapshot 会回退
+    # 到 host(x86_64)V8 snapshot,arm64 设备上加载直接 SIGSEGV。本机构建时
+    # host == target,快照架构正确,也不需要 zigbuild/btls-sys 两 pass hack。
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install toolchain
+      - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal
-          rustup target add aarch64-unknown-linux-gnu
-          pip3 install --quiet cargo-zigbuild==0.23.4
+          rustup default stable
+      - name: Install system deps
+        run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libc6-dev-arm64-cross binutils-aarch64-linux-gnu
-      - name: First pass (build boringssl artifacts)
-        run: |
-          export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
-          cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth || true
-          LIBSSL=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libssl.a" | head -1)
-          LIBCRYPTO=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libcrypto.a" | head -1)
-          echo "LIBSSL=$LIBSSL LIBCRYPTO=$LIBCRYPTO"
-          test -n "$LIBSSL" && test -n "$LIBCRYPTO"
-          # 跨 step 传变量(step 是独立 shell,普通变量不持久)
-          echo "LIBSSL=$LIBSSL" >> "$GITHUB_ENV"
-          echo "LIBCRYPTO=$LIBCRYPTO" >> "$GITHUB_ENV"
-      - name: Second pass (relink with redefined archives)
-        run: |
-          export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
-          test -n "$LIBSSL" && test -n "$LIBCRYPTO"
-          # btls-sys 经 [patch.crates-io] 本地修复:prefix.rs 内部按成员 redefine。
-          # 注意:btls-sys 链接时也会通过 -L 搜到同一份 .a,--whole-archive 绝对路径
-          # 注入会造成 duplicate symbol,所以只注入一次;空变量时由 libbtls-sys.a 正常解析。
-          export RUSTFLAGS="-C link-arg=-Wl,--whole-archive -C link-arg=$LIBSSL -C link-arg=$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive"
-          cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth
+          sudo apt-get install -y -qq clang libclang-dev pkg-config
+      - name: Build (stealth)
+        run: cargo build --release -p obscura-cli --features stealth
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: obscura-linux-arm64
-          path: target/aarch64-unknown-linux-gnu/release/obscura
+          path: target/release/obscura
           if-no-files-found: error
