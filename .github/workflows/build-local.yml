@@ -54,6 +54,8 @@ jobs:
       - name: Build (stealth, aarch64 gnu via zig)
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
+          export CFLAGS="-fno-lto -fno-fat-lto-objects"
+          export CXXFLAGS="-fno-lto"
           # 第一次构建:链接会失败(btls -l 丢失),但 cmake 会编出 boringssl .a
           cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth || true
           LIBSSL=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libssl.a" | head -1)
@@ -95,6 +97,8 @@ jobs:
           nm "$LIBCRYPTO" 2>/dev/null | grep -c "CRYPTO_library_init" || true
           echo "=== file size check:"
           ls -la "$LIBSSL" "$LIBCRYPTO"
+          echo "=== member format:"
+          cd /tmp && ar x "$OLDPWD/$LIBSSL" ssl_versions.cc.o 2>/dev/null || ar x "$LIBSSL" ssl_versions.cc.o 2>/dev/null; file ssl_versions.cc.o 2>/dev/null | head -1; cd "$OLDPWD"
           echo "=== try redefine manually on a copy:"
           cp "$LIBSSL" /tmp/ssl-test.a
           head -2 "$OUT/redefine_syms.txt" > /tmp/rd.txt 2>/dev/null || echo "no rd file"
