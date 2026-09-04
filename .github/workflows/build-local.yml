@@ -60,6 +60,18 @@ jobs:
           LIBCRYPTO=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libcrypto.a" | head -1)
           echo "LIBSSL=$LIBSSL LIBCRYPTO=$LIBCRYPTO"
           test -n "$LIBSSL" && test -n "$LIBCRYPTO"
+          # btls-sys 的 prefix_symbols(GNU objcopy)在 CI 上零效果:手动补
+          # (优先 llvm-objcopy,回退 GNU objcopy)
+          OUTDIR=$(dirname "$LIBSSL")
+          RD="$OUTDIR/redefine_syms.txt"
+          ls -la "$RD" || RD=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*" -name "redefine_syms.txt" | head -1)
+          echo "RD=$RD ($(wc -l < "$RD") syms)"
+          OC=$(command -v llvm-objcopy || echo objcopy)
+          echo "using objcopy: $OC"
+          cp "$LIBSSL" "$LIBSSL.bak"; cp "$LIBCRYPTO" "$LIBCRYPTO.bak"
+          "$OC" --redefine-syms="$RD" "$LIBSSL"
+          "$OC" --redefine-syms="$RD" "$LIBCRYPTO"
+          echo "after redefine: prefixed-in-ssl=$(nm "$LIBSSL" | grep -c build_script_main_SSL_read) prefixed-in-crypto=$(nm "$LIBCRYPTO" | grep -c build_script_main_CRYPTO_library_init)"
           # 第二次:rustc 额外参数变化只触发重链(rlib 全部复用缓存)
           RELINK_ARGS="--bin obscura -- -C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive"
           cargo zigbuild rustc --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth $RELINK_ARGS
