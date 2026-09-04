@@ -89,7 +89,7 @@ jobs:
           # 第二次:RUSTFLAGS 注入。注意:RUSTFLAGS 变化会重编 btls-sys
           #(cmake 重跑,产生新 OUT_DIR 的原始名 .a),所以构建后再做一轮
           # redefine + 重试(增量,只重链)
-          export RUSTFLAGS="-C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive"
+          export RUSTFLAGS="-C link-arg=$PWD/$LIBCRYPTO -C link-arg=$PWD/$LIBSSL"
           for ATTEMPT in 1 2 3; do
             if cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth; then
               echo "BUILD_OK attempt=$ATTEMPT"; break
@@ -111,8 +111,8 @@ jobs:
             }
             redefine_archive "$LIBSSL2"; redefine_archive "$LIBCRYPTO2"
             echo "redefined: prefixed-ssl=$(nm "$LIBSSL2" | grep -c build_script_main_SSL_read)"
-            # 更新 RUSTFLAGS 指向新 .a
-            export RUSTFLAGS="-C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL2 -C link-arg=$PWD/$LIBCRYPTO2 -C link-arg=-Wl,--no-whole-archive"
+            # 更新 RUSTFLAGS 指向新 .a(crypto 在前,ssl 在后解析其依赖)
+            export RUSTFLAGS="-C link-arg=$PWD/$LIBCRYPTO2 -C link-arg=$PWD/$LIBSSL2"
           done
       - name: Diagnose btls symbols (on failure)
         if: failure()
