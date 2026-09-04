@@ -61,6 +61,9 @@ base64 = "0.22"
 [patch.crates-io]
 # Keep the grid shrink-to-fit correction local until it lands upstream.
 taffy = { path = "vendor/taffy" }
+# Local fix: btls-sys prefix_symbols applies objcopy per archive member
+# (archive-wide objcopy --redefine-syms is a silent no-op on CI).
+btls-sys = { path = "crates/btls-sys-patch" }
 # Carry the same canonical variable-font coordinates through shaping and
 # rasterization until the upstream API exposes them.
 cosmic-text = { path = "vendor/cosmic-text" }
