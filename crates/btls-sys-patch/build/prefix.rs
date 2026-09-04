@@ -49,15 +49,36 @@ pub fn prefix_symbols(config: &Config) {
     // Use `nm` to list symbols in these static libraries. Cross builds need
     // the target-prefixed binutils (host objcopy's BFD lacks foreign backends
     // and reports "Unable to recognise the format of the input file").
-    let triple_prefix = format!("{}-", config.target);
+    // Debian multiarch uses the short triple (aarch64-linux-gnu-*), not
+    // the full rustc triple (aarch64-unknown-linux-gnu-*). Try both, then
+    // the unprefixed name, then llvm-objcopy (multi-target by construction).
+    let full_prefix = format!("{}-", config.target);
+    let short_prefix = format!(
+        "{}-",
+        config
+            .target
+            .split('-')
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, p)| p)
+            .collect::<Vec<_>>()
+            .join("-")
+    );
     let find_bin = |names: &[&str]| -> PathBuf {
         for name in names {
-            let candidate = format!("{triple_prefix}{name}");
-            if which(&candidate).is_some() {
-                return PathBuf::from(candidate);
+            for prefix in [&full_prefix, &short_prefix] {
+                let candidate = format!("{prefix}{name}");
+                if which(&candidate).is_some() {
+                    return PathBuf::from(candidate);
+                }
             }
         }
-        names.first().map(PathBuf::from).unwrap()
+        for name in names {
+            if which(name).is_some() {
+                return PathBuf::from(name);
+            }
+        }
+        PathBuf::from(names.first().unwrap())
     };
     let nm = match &*config.target_os {
         "android" => android_toolchain(config).join("llvm-nm"),
@@ -93,6 +114,7 @@ pub fn prefix_symbols(config: &Config) {
     let objcopy = match &*config.target_os {
         "android" => android_toolchain(config).join("llvm-objcopy"),
         _ => find_bin(&["objcopy", "llvm-objcopy"]),
+        // find_bin falls back to llvm-objcopy which supports all targets
     };
     let ar = find_bin(&["ar"]);
     for static_lib in &static_libs {
