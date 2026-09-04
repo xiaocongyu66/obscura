@@ -56,11 +56,17 @@ jobs:
           LIBCRYPTO=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libcrypto.a" | head -1)
           echo "LIBSSL=$LIBSSL LIBCRYPTO=$LIBCRYPTO"
           test -n "$LIBSSL" && test -n "$LIBCRYPTO"
+          # 跨 step 传变量(step 是独立 shell,普通变量不持久)
+          echo "LIBSSL=$LIBSSL" >> "$GITHUB_ENV"
+          echo "LIBCRYPTO=$LIBCRYPTO" >> "$GITHUB_ENV"
       - name: Second pass (relink with redefined archives)
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
-          # btls-sys 经 [patch.crates-io] 本地修复:prefix.rs 内部按成员 redefine
-          export RUSTFLAGS="-C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive"
+          test -n "$LIBSSL" && test -n "$LIBCRYPTO"
+          # btls-sys 经 [patch.crates-io] 本地修复:prefix.rs 内部按成员 redefine。
+          # 注意:btls-sys 链接时也会通过 -L 搜到同一份 .a,--whole-archive 绝对路径
+          # 注入会造成 duplicate symbol,所以只注入一次;空变量时由 libbtls-sys.a 正常解析。
+          export RUSTFLAGS="-C link-arg=-Wl,--whole-archive -C link-arg=$LIBSSL -C link-arg=$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive"
           cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth
       - name: Upload artifact
         uses: actions/upload-artifact@v4
