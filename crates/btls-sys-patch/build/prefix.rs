@@ -143,10 +143,12 @@ pub fn prefix_symbols(config: &Config) {
             )
             .unwrap();
         }
-        let objects: Vec<_> = fs::read_dir(&workdir)
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
+        // 保留原归档成员顺序(ar rcs 的字母序会打乱 BoringSSL 期望的布局)
+        let member_order = member_list(static_lib);
+        let objects: Vec<_> = member_order
+            .iter()
+            .map(|name| workdir.join(name))
+            .filter(|p| p.exists())
             .collect();
         let lib_path = static_lib.canonicalize().unwrap();
         let _ = fs::remove_file(static_lib);
@@ -180,4 +182,18 @@ fn which(name: &str) -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// 用 `ar t` 读原始成员顺序(重打包时保持一致)。
+fn member_list(archive: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("ar")
+        .arg("t")
+        .arg(archive)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
