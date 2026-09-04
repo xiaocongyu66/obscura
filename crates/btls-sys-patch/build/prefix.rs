@@ -46,10 +46,22 @@ pub fn prefix_symbols(config: &Config) {
     .filter(|p| p.exists())
     .collect();
 
-    // Use `nm` to list symbols in these static libraries
+    // Use `nm` to list symbols in these static libraries. Cross builds need
+    // the target-prefixed binutils (host objcopy's BFD lacks foreign backends
+    // and reports "Unable to recognise the format of the input file").
+    let triple_prefix = format!("{}-", config.target);
+    let find_bin = |names: &[&str]| -> PathBuf {
+        for name in names {
+            let candidate = format!("{triple_prefix}{name}");
+            if which(&candidate).is_some() {
+                return PathBuf::from(candidate);
+            }
+        }
+        names.first().map(PathBuf::from).unwrap()
+    };
     let nm = match &*config.target_os {
         "android" => android_toolchain(config).join("llvm-nm"),
-        _ => PathBuf::from("nm"),
+        _ => find_bin(&["nm"]),
     };
     let out = run_command(Command::new(nm).args(&static_libs)).unwrap();
     let mut redefine_syms: Vec<String> = String::from_utf8_lossy(&out.stdout)
@@ -80,9 +92,9 @@ pub fn prefix_symbols(config: &Config) {
     // aarch64 archives). Expand, redefine each member, repack.
     let objcopy = match &*config.target_os {
         "android" => android_toolchain(config).join("llvm-objcopy"),
-        _ => PathBuf::from("objcopy"),
+        _ => find_bin(&["objcopy", "llvm-objcopy"]),
     };
-    let ar = PathBuf::from("ar");
+    let ar = find_bin(&["ar"]);
     for static_lib in &static_libs {
         let workdir = static_lib.parent().unwrap().join(format!(
             "{}_redefine_work",
@@ -125,4 +137,24 @@ pub fn prefix_symbols(config: &Config) {
         .unwrap();
         let _ = fs::remove_dir_all(&workdir);
     }
+}
+
+/// Minimal PATH lookup (avoid a `which` crate dependency).
+fn which(name: &str) -> Option<std::path::PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if candidate.metadata().ok()?.permissions().mode() & 0o111 != 0 {
+                    return Some(candidate);
+                }
+            }
+            #[cfg(not(unix))]
+            return Some(candidate);
+        }
+    }
+    None
 }
