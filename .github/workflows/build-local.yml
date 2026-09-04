@@ -86,10 +86,9 @@ jobs:
           redefine_archive "$LIBSSL"
           redefine_archive "$LIBCRYPTO"
           echo "after redefine: prefixed-in-ssl=$(nm "$LIBSSL" | grep -c build_script_main_SSL_read) prefixed-in-crypto=$(nm "$LIBCRYPTO" | grep -c build_script_main_CRYPTO_library_init)"
-          # 第二次:rustc 额外参数变化只触发重链(rlib 全部复用缓存)
-          RELINK_ARGS="--bin obscura -- -C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive"
-          cargo zigbuild rustc --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth $RELINK_ARGS
-          cargo zigbuild rustc --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth --bin obscura-worker -- -C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive
+          # 第二次:RUSTFLAGS 注入(指纹变化触发重编,但 cmake 产物已就位)
+          export RUSTFLAGS="-C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive"
+          cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth
       - name: Diagnose btls symbols (on failure)
         if: failure()
         run: |
