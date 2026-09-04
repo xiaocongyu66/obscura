@@ -148,11 +148,12 @@ pub fn prefix_symbols(config: &Config) {
             .flatten()
             .map(|e| e.path())
             .collect();
+        let lib_path = static_lib.canonicalize().unwrap();
         let _ = fs::remove_file(static_lib);
         run_command(
             Command::new(&ar)
                 .arg("rcs")
-                .arg(static_lib.canonicalize().unwrap())
+                .arg(&lib_path)
                 .args(&objects)
                 .current_dir(&workdir),
         )
