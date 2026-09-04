@@ -86,9 +86,34 @@ jobs:
           redefine_archive "$LIBSSL"
           redefine_archive "$LIBCRYPTO"
           echo "after redefine: prefixed-in-ssl=$(nm "$LIBSSL" | grep -c build_script_main_SSL_read) prefixed-in-crypto=$(nm "$LIBCRYPTO" | grep -c build_script_main_CRYPTO_library_init)"
-          # 第二次:RUSTFLAGS 注入(指纹变化触发重编,但 cmake 产物已就位)
+          # 第二次:RUSTFLAGS 注入。注意:RUSTFLAGS 变化会重编 btls-sys
+          #(cmake 重跑,产生新 OUT_DIR 的原始名 .a),所以构建后再做一轮
+          # redefine + 重试(增量,只重链)
           export RUSTFLAGS="-C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive"
-          cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth
+          for ATTEMPT in 1 2 3; do
+            if cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth; then
+              echo "BUILD_OK attempt=$ATTEMPT"; break
+            fi
+            echo "--- attempt $ATTEMPT failed; find+redefine+retry"
+            LIBSSL2=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libssl.a" -newer /tmp -o -path "*btls-sys*/out/build/libssl.a" | xargs ls -t 2>/dev/null | head -1)
+            LIBCRYPTO2=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libcrypto.a" | xargs ls -t 2>/dev/null | head -1)
+            echo "LIBSSL2=$LIBSSL2 LIBCRYPTO2=$LIBCRYPTO2"
+            test -n "$LIBSSL2" && test -n "$LIBCRYPTO2" || exit 3
+            RD2=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*" -name "redefine_syms.txt" | xargs ls -t | head -1)
+            OC=/usr/bin/aarch64-linux-gnu-objcopy
+            TMPD=$(mktemp -d)
+            redefine_archive() {
+              local ARCHIVE="$1" TMP="$TMPD/m$ATTEMPT"
+              rm -rf "$TMP"; mkdir -p "$TMP"
+              (cd "$TMP" && ar x "$OLDPWD/$ARCHIVE")
+              for o in "$TMP"/*.o; do "$OC" --redefine-syms="$RD2" "$o"; done
+              rm -f "$ARCHIVE"; ar rcs "$ARCHIVE" "$TMP"/*.o; rm -rf "$TMP"
+            }
+            redefine_archive "$LIBSSL2"; redefine_archive "$LIBCRYPTO2"
+            echo "redefined: prefixed-ssl=$(nm "$LIBSSL2" | grep -c build_script_main_SSL_read)"
+            # 更新 RUSTFLAGS 指向新 .a
+            export RUSTFLAGS="-C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL2 -C link-arg=$PWD/$LIBCRYPTO2 -C link-arg=-Wl,--no-whole-archive"
+          done
       - name: Diagnose btls symbols (on failure)
         if: failure()
         run: |
