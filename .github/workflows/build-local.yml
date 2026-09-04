@@ -13,7 +13,7 @@ env:
 
 jobs:
   build-linux-x86_64:
-    name: Linux x86_64 (glibc)
+    name: Linux x86_64
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -33,118 +33,38 @@ jobs:
           path: target/release/obscura
           if-no-files-found: error
 
-  build-android-aarch64:
-    name: Termux aarch64 (zigbuild cross)
+  build-linux-arm64:
+    name: Linux arm64 (cross)
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install Rust + aarch64 gnu target + zigbuild
+      - name: Install toolchain
         run: |
           rustup toolchain install stable --profile minimal
           rustup target add aarch64-unknown-linux-gnu
-          pip3 install --upgrade --quiet cargo-zigbuild
-          cargo zigbuild --help > /dev/null && echo zigbuild-ok
-      - name: Install aarch64 libc headers (bindgen)
-        run: |
+          pip3 install --quiet cargo-zigbuild==0.23.4
           sudo apt-get update -qq
           sudo apt-get install -y -qq libc6-dev-arm64-cross binutils-aarch64-linux-gnu
-      - name: Build (stealth, aarch64 gnu via zig)
+      - name: First pass (build boringssl artifacts)
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
-          export CFLAGS="-fno-lto -fno-fat-lto-objects"
-          export CXXFLAGS="-fno-lto"
-          # 第一次构建:链接会失败(btls -l 丢失),但 cmake 会编出 boringssl .a
           cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth || true
           LIBSSL=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libssl.a" | head -1)
           LIBCRYPTO=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libcrypto.a" | head -1)
           echo "LIBSSL=$LIBSSL LIBCRYPTO=$LIBCRYPTO"
           test -n "$LIBSSL" && test -n "$LIBCRYPTO"
-          # btls-sys 的 prefix_symbols(GNU objcopy)在 CI 上零效果:手动补
-          # (优先 llvm-objcopy,回退 GNU objcopy)
-          OUTDIR=$(dirname "$LIBSSL")
-          RD="$OUTDIR/redefine_syms.txt"
-          ls -la "$RD" || RD=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*" -name "redefine_syms.txt" | head -1)
-          echo "RD=$RD ($(wc -l < "$RD") syms)"
-          OC=$(command -v llvm-objcopy || command -v aarch64-linux-gnu-objcopy || echo objcopy)
-          echo "using objcopy: $OC"
-          # GNU objcopy 对 .a 归档整体 redefine 无效(实测):展开成员逐个改再重打包
-          redefine_archive() {
-            local ARCHIVE="$1" TMP
-            TMP=$(mktemp -d)
-            (cd "$TMP" && ar x "$OLDPWD/$ARCHIVE")
-            for o in "$TMP"/*.o; do
-              "$OC" --redefine-syms="$RD" "$o" || echo "redefine failed: $o"
-            done
-            rm -f "$ARCHIVE"
-            ar rcs "$ARCHIVE" "$TMP"/*.o
-            rm -rf "$TMP"
-          }
-          cp "$LIBSSL" "$LIBSSL.bak"; cp "$LIBCRYPTO" "$LIBCRYPTO.bak"
-          redefine_archive "$LIBSSL"
-          redefine_archive "$LIBCRYPTO"
-          echo "after redefine: prefixed-in-ssl=$(nm "$LIBSSL" | grep -c build_script_main_SSL_read) prefixed-in-crypto=$(nm "$LIBCRYPTO" | grep -c build_script_main_CRYPTO_library_init)"
-          # redefine 之后,恢复原生链接机制(无 RUSTFLAGS 注入):
-          # 前次 duplicate symbol 说明 -l static 已能解析,绝对路径注入
-          # 反而与 -L 搜索到的同一 .a 重复
-          unset RUSTFLAGS
-          for ATTEMPT in 1 2 3; do
-            if cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth; then
-              echo "BUILD_OK attempt=$ATTEMPT"; break
-            fi
-            echo "--- attempt $ATTEMPT failed; find+redefine+retry"
-            LIBSSL2=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libssl.a" -newer /tmp -o -path "*btls-sys*/out/build/libssl.a" | xargs ls -t 2>/dev/null | head -1)
-            LIBCRYPTO2=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*/out/build/libcrypto.a" | xargs ls -t 2>/dev/null | head -1)
-            echo "LIBSSL2=$LIBSSL2 LIBCRYPTO2=$LIBCRYPTO2"
-            test -n "$LIBSSL2" && test -n "$LIBCRYPTO2" || exit 3
-            RD2=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*" -name "redefine_syms.txt" | xargs ls -t | head -1)
-            OC=/usr/bin/aarch64-linux-gnu-objcopy
-            TMPD=$(mktemp -d)
-            redefine_archive() {
-              local ARCHIVE="$1" TMP="$TMPD/m$ATTEMPT"
-              rm -rf "$TMP"; mkdir -p "$TMP"
-              (cd "$TMP" && ar x "$OLDPWD/$ARCHIVE")
-              for o in "$TMP"/*.o; do "$OC" --redefine-syms="$RD2" "$o"; done
-              rm -f "$ARCHIVE"; ar rcs "$ARCHIVE" "$TMP"/*.o; rm -rf "$TMP"
-            }
-            redefine_archive "$LIBSSL2"; redefine_archive "$LIBCRYPTO2"
-            echo "redefined: prefixed-ssl=$(nm "$LIBSSL2" | grep -c build_script_main_SSL_read)"
-          done
-      - name: Diagnose btls symbols (on failure)
-        if: failure()
+      - name: Second pass (relink with redefined archives)
         run: |
-          OUT=$(find target/aarch64-unknown-linux-gnu/release/build -maxdepth 3 -type d -name out -path "*btls*" | head -1)
-          echo "OUT=$OUT"
-          find "$OUT" -name "libcrypto.a" -o -name "libssl.a" 2>/dev/null
-          LIB=$(find "$OUT" -name "libcrypto.a" | head -1)
-          LIBSSL=$(find "$OUT" -name "libssl.a" | head -1)
-          echo "=== nm libssl.a first 15 defined symbols:"
-          nm "$LIBSSL" 2>/dev/null | grep " T " | head -15
-          echo "=== SSL_read in libssl.a:"
-          nm "$LIBSSL" 2>/dev/null | grep -c "SSL_read" || true
-          LIBCRYPTO=$(find "$OUT" -name "libcrypto.a" | head -1)
-          echo "=== nm libcrypto.a first 10 defined symbols:"
-          nm "$LIBCRYPTO" 2>/dev/null | grep " T " | head -10
-          echo "=== CRYPTO_library_init in libcrypto.a:"
-          nm "$LIBCRYPTO" 2>/dev/null | grep -c "CRYPTO_library_init" || true
-          echo "=== file size check:"
-          ls -la "$LIBSSL" "$LIBCRYPTO"
-          echo "=== member format:"
-          cd /tmp && ar x "$OLDPWD/$LIBSSL" ssl_versions.cc.o 2>/dev/null || ar x "$LIBSSL" ssl_versions.cc.o 2>/dev/null; file ssl_versions.cc.o 2>/dev/null | head -1; cd "$OLDPWD"
-          echo "=== try redefine manually on a copy:"
-          cp "$LIBSSL" /tmp/ssl-test.a
-          head -2 "$OUT/redefine_syms.txt" > /tmp/rd.txt 2>/dev/null || echo "no rd file"
-          wc -l "$OUT/redefine_syms.txt" 2>/dev/null || true
-          objcopy --redefine-syms="$OUT/redefine_syms.txt" /tmp/ssl-test.a && echo "objcopy OK" || echo "objcopy FAILED"
-          echo "=== after manual redefine, SSL_read count:"
-          nm /tmp/ssl-test.a 2>/dev/null | grep -c "SSL_read" || true
-          echo "=== after manual redefine, prefixed count:"
-          nm /tmp/ssl-test.a 2>/dev/null | grep -c "build_script_main_SSL_read" || true
+          export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
+          # btls-sys 经 [patch.crates-io] 本地修复:prefix.rs 内部按成员 redefine
+          export RUSTFLAGS="-C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive"
+          cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.31 -p obscura-cli --features stealth
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: obscura-termux-aarch64
+          name: obscura-linux-arm64
           path: target/aarch64-unknown-linux-gnu/release/obscura
           if-no-files-found: error
