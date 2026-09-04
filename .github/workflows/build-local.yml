@@ -70,9 +70,21 @@ jobs:
           echo "RD=$RD ($(wc -l < "$RD") syms)"
           OC=$(command -v llvm-objcopy || echo objcopy)
           echo "using objcopy: $OC"
+          # GNU objcopy 对 .a 归档整体 redefine 无效(实测):展开成员逐个改再重打包
+          redefine_archive() {
+            local ARCHIVE="$1" TMP
+            TMP=$(mktemp -d)
+            (cd "$TMP" && ar x "$OLDPWD/$ARCHIVE")
+            for o in "$TMP"/*.o; do
+              "$OC" --redefine-syms="$RD" "$o" || echo "redefine failed: $o"
+            done
+            rm -f "$ARCHIVE"
+            ar rcs "$ARCHIVE" "$TMP"/*.o
+            rm -rf "$TMP"
+          }
           cp "$LIBSSL" "$LIBSSL.bak"; cp "$LIBCRYPTO" "$LIBCRYPTO.bak"
-          "$OC" --redefine-syms="$RD" "$LIBSSL"
-          "$OC" --redefine-syms="$RD" "$LIBCRYPTO"
+          redefine_archive "$LIBSSL"
+          redefine_archive "$LIBCRYPTO"
           echo "after redefine: prefixed-in-ssl=$(nm "$LIBSSL" | grep -c build_script_main_SSL_read) prefixed-in-crypto=$(nm "$LIBCRYPTO" | grep -c build_script_main_CRYPTO_library_init)"
           # 第二次:rustc 额外参数变化只触发重链(rlib 全部复用缓存)
           RELINK_ARGS="--bin obscura -- -C link-arg=-Wl,--whole-archive -C link-arg=$PWD/$LIBSSL -C link-arg=$PWD/$LIBCRYPTO -C link-arg=-Wl,--no-whole-archive"
