@@ -50,7 +50,7 @@ jobs:
       - name: Install aarch64 libc headers (bindgen)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libc6-dev-arm64-cross
+          sudo apt-get install -y -qq libc6-dev-arm64-cross binutils-aarch64-linux-gnu
       - name: Build (stealth, aarch64 gnu via zig)
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"
@@ -68,7 +68,7 @@ jobs:
           RD="$OUTDIR/redefine_syms.txt"
           ls -la "$RD" || RD=$(find target/aarch64-unknown-linux-gnu/release/build -path "*btls-sys*" -name "redefine_syms.txt" | head -1)
           echo "RD=$RD ($(wc -l < "$RD") syms)"
-          OC=$(command -v llvm-objcopy || echo objcopy)
+          OC=$(command -v llvm-objcopy || command -v aarch64-linux-gnu-objcopy || echo objcopy)
           echo "using objcopy: $OC"
           # GNU objcopy 对 .a 归档整体 redefine 无效(实测):展开成员逐个改再重打包
           redefine_archive() {
