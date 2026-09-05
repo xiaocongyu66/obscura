@@ -38,6 +38,10 @@ pub struct FrameRealm {
     frame_id: u32,
     parent_frame_id: u32,
     url: String,
+    /// Base URL for resolving the frame's relative subresource URLs.
+    /// Equals `url` except for about:blank / about:srcdoc frames, which
+    /// inherit the parent document's URL per HTML spec.
+    resolve_base: String,
     origin: String,
 }
 
@@ -123,10 +127,13 @@ impl FrameRealm {
         };
         // :target 匹配依赖 DomTree 里的文档 URL(取 fragment)。这里同步
         // 一次,frame 的第一次查询就能拿到;后续 URL 变化由 document_url
-        // op 懒同步。
-        dom.set_document_url(url);
+        // op 懒同步。about:blank / srcdoc 继承父页 URL 作为 document URL
+        // (与 resolve_base 一致):JS 侧 new URL(relative, document.URL)
+        // 否则会在 about:blank 上解析失败。
+        let doc_url = if inherits_parent { parent.page_url() } else { url.to_string() };
+        dom.set_document_url(&doc_url);
         state.dom = Some(dom);
-        state.url = url.to_string();
+        state.url = doc_url.clone();
         state.frame_id = frame_id;
         parent.share_resources_with(&mut state);
         if let Some(enc) = encoding {
@@ -148,6 +155,16 @@ impl FrameRealm {
             frame_id,
             parent_frame_id,
             url: url.to_string(),
+            // about:blank / about:srcdoc frames resolve relative subresource
+            // URLs against the PARENT document URL (HTML spec base-URL
+            // inheritance). Without this, CF Turnstile's challenge iframe —
+            // an about:blank document with a relative script src — resolves
+            // scripts against "about:blank" and every fetch dies.
+            resolve_base: if inherits_parent {
+                parent.page_url()
+            } else {
+                url.to_string()
+            },
             origin,
         };
         // Both ids before init, not after: init is what installs `parent` and
@@ -364,7 +381,7 @@ impl FrameRealm {
     /// Resolves a subresource URL against the frame's own document URL, not the
     /// parent's. A relative `src` in a frame is relative to the frame.
     fn resolve(&self, src: &str) -> String {
-        url::Url::parse(&self.url)
+        url::Url::parse(&self.resolve_base)
             .and_then(|base| base.join(src))
             .map(|url| url.to_string())
             .unwrap_or_else(|_| src.to_string())

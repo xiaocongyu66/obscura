@@ -648,6 +648,13 @@ impl ObscuraJsRuntime {
         }
     }
 
+    /// The full URL of the document this runtime is running. Used as the
+    /// subresource-resolution base for about:blank / about:srcdoc child
+    /// frames, which inherit it per HTML spec.
+    pub(crate) fn page_url(&self) -> String {
+        self.state.borrow().url.clone()
+    }
+
     /// Gives a same-origin frame realm the page's security token.
     ///
     /// V8 access-checks property reads across contexts and answers `undefined`
