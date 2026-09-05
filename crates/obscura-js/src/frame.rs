@@ -43,6 +43,10 @@ pub struct FrameRealm {
     /// inherit the parent document's URL per HTML spec.
     resolve_base: String,
     origin: String,
+    /// NodeId of this frame's `<iframe>` element in the OWNER realm's DOM
+    /// (0 when unknown). Message delivery hands it to the receiving realm so
+    /// `event.source` can be wrapped in the receiver's world.
+    pub element_nid: u64,
 }
 
 impl Drop for FrameRealm {
@@ -166,6 +170,7 @@ impl FrameRealm {
                 url.to_string()
             },
             origin,
+            element_nid: frame.element_nid,
         };
         // Both ids before init, not after: init is what installs `parent` and
         // `top`, and a document that runs even one script believing it is
@@ -224,11 +229,12 @@ impl FrameRealm {
         data_json: &str,
         origin: &str,
         source_frame_id: u32,
+        source_element_nid: u64,
     ) -> Result<(), String> {
         self.execute_script(
             parent,
             &format!(
-                "globalThis.__obscura_deliverMessage({}, {}, {source_frame_id});",
+                "globalThis.__obscura_deliverMessage({}, {}, {source_frame_id}, {source_element_nid});",
                 encode_json_argument(data_json),
                 encode_json_argument(origin),
             ),
@@ -865,10 +871,11 @@ mod tests {
         assert_eq!(queued[0].target_frame_id, 0);
         assert_eq!(queued[0].source_frame_id, 1);
         let script = format!(
-            "globalThis.__obscura_deliverMessage({}, {}, {});",
+            "globalThis.__obscura_deliverMessage({}, {}, {}, {});",
             serde_json::to_string(&queued[0].data_json).unwrap(),
             serde_json::to_string(&queued[0].origin).unwrap(),
             queued[0].source_frame_id,
+            queued[0].source_element_nid,
         );
         parent.execute_script("<frame-message>", &script).unwrap();
 

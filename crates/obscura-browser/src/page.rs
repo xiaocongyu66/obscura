@@ -1190,11 +1190,24 @@ impl Page {
         for message in pending {
             let escaped_data = serde_json::to_string(&message.data_json).unwrap_or_default();
             let escaped_origin = serde_json::to_string(&message.origin).unwrap_or_default();
+            // The sender's `<iframe>` node id as seen in the OWNER realm, so
+            // the receiver can wrap `event.source` in its own world (per-world
+            // WindowProxy). Sender-stamped nid wins; otherwise fall back to
+            // the registration table.
+            let source_element_nid = if message.source_element_nid != 0 {
+                message.source_element_nid
+            } else {
+                self.frames
+                    .iter()
+                    .find(|frame| frame.frame_id() == message.source_frame_id)
+                    .map(|frame| frame.element_nid)
+                    .unwrap_or(0)
+            };
             if message.target_frame_id == 0 {
                 let Some(js) = self.js.as_mut() else { continue };
                 let script = format!(
-                    "globalThis.__obscura_deliverMessage({escaped_data}, {escaped_origin}, {})",
-                    message.source_frame_id,
+                    "globalThis.__obscura_deliverMessage({escaped_data}, {escaped_origin}, {}, {})",
+                    message.source_frame_id, source_element_nid,
                 );
                 // Use evaluate_for_cdp which properly enters the page's V8 context
                 // and runs the event loop so dispatchEvent callbacks fire.
@@ -1217,6 +1230,7 @@ impl Page {
                 &message.data_json,
                 &message.origin,
                 message.source_frame_id,
+                source_element_nid,
             ) {
                 tracing::debug!("message to frame {} failed: {error}", message.target_frame_id);
             }
@@ -1237,7 +1251,8 @@ impl Page {
              }}\
              delete globalThis.__obscura_frameObjects[{frame_id}];\
              delete globalThis.__obscura_frameWindows[{frame_id}];\
-             delete globalThis.__obscura_frameElements[{frame_id}];"
+             delete globalThis.__obscura_frameElements[{frame_id}];\
+             try {{ Deno.core.ops.op_forget_frame_element_nid({frame_id}); }} catch (_) {{ }}"
         );
         self.execute_frame_owner_script(parent_frame_id, &script);
         if parent_frame_id != 0 {

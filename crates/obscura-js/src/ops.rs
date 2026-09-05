@@ -160,6 +160,12 @@ pub struct ObscuraState {
     /// Bytes of payload currently queued above, tracked rather than summed so
     /// the cap costs nothing per message.
     pub pending_frame_message_bytes: usize,
+    /// frame_id → the NodeId of that frame's `<iframe>` element, recorded at
+    /// registration (op_frame_document_ready / op_frame_navigate). Lets a
+    /// frame realm that posts as itself resolve the element nid its receiver
+    /// needs for `event.source` — the element lives in the owner realm, so
+    /// the sender cannot see it.
+    pub frame_element_nids: std::collections::HashMap<u32, u64>,
     /// Requests initiated by this runtime only. Browser contexts share their
     /// transport client across pages, so the client's aggregate counter cannot
     /// be used as a page-readiness signal.
@@ -275,6 +281,12 @@ pub struct PendingFrame {
     pub viewport_height: u64,
     /// The frame that holds this one; 0 when the page does.
     pub parent_frame_id: u32,
+    /// NodeId of the `<iframe>` element this document belongs to, as
+    /// registered in the OWNER realm's DOM. 0 when unknown (page-level
+    /// documents). The host uses it to route `event.source`: the receiving
+    /// realm wraps THIS node in its own world, matching how Chromium hands
+    /// out per-world WindowProxy wrappers for a frame.
+    pub element_nid: u64,
 }
 
 /// One `postMessage` in flight between two realms.
@@ -290,6 +302,11 @@ pub struct PendingFrameMessage {
     /// a widget reporting a result. Anything it cannot encode is rejected by
     /// the sender rather than silently arriving as null.
     pub data_json: String,
+    /// NodeId of the sender frame's `<iframe>` element (in the OWNER
+    /// realm's DOM). The receiver wraps this node in its own world to build
+    /// `event.source`, so identity checks against `iframe.contentWindow`
+    /// hold across realms (Chromium WindowProxy semantics). 0 = unknown.
+    pub source_element_nid: u64,
 }
 
 impl ObscuraState {
@@ -318,6 +335,7 @@ impl ObscuraState {
             js_network_events: Vec::new(),
             pending_frames: Vec::new(),
             pending_frame_bytes: 0,
+            frame_element_nids: std::collections::HashMap::new(),
             frame_id_counter: 0,
             frame_id: 0,
             pending_frame_messages: Vec::new(),
@@ -3673,6 +3691,7 @@ fn op_post_frame_message(
     state: &OpState,
     target_frame_id: u32,
     source_frame_id: u32,
+    #[number] source_element_nid: u64,
     #[string] origin: &str,
     #[string] data_json: &str,
 ) {
@@ -3693,12 +3712,30 @@ fn op_post_frame_message(
         return;
     }
     gs.pending_frame_message_bytes = gs.pending_frame_message_bytes.saturating_add(data_json.len());
+    // A frame realm posting as itself (globalThis.postMessage) has no
+    // element handle — its `<iframe>` lives in the OWNER realm. Resolve the
+    // nid from the frame registration table so the receiver still gets a
+    // resolvable `event.source`.
+    let source_element_nid = if source_element_nid != 0 {
+        source_element_nid
+    } else {
+        gs.frame_element_nids.get(&source_frame_id).copied().unwrap_or(0)
+    };
     gs.pending_frame_messages.push(PendingFrameMessage {
         target_frame_id,
         source_frame_id,
+        source_element_nid,
         origin: origin.to_string(),
         data_json: data_json.to_string(),
     });
+}
+
+/// Drops the frame_id → element-nid registration for a torn-down frame, so
+/// a recycled id can never hand a stale `<iframe>` node to a receiver.
+#[op2(fast)]
+fn op_forget_frame_element_nid(state: &OpState, frame_id: u32) {
+    let gs = state.borrow::<SharedState>().clone();
+    gs.borrow_mut().frame_element_nids.remove(&frame_id);
 }
 
 /// Resolves after `millis`, as the timer source for child frame realms.
@@ -3727,6 +3764,7 @@ fn op_frame_document_ready(
     #[string] html: &str,
     #[number] viewport_width: u64,
     #[number] viewport_height: u64,
+    #[number] element_nid: u64,
 ) -> u32 {
     // Whoever called this is the new frame's parent, which is how a frame
     // nested two deep gets `parent` pointing at the frame above it rather than
@@ -3760,7 +3798,11 @@ fn op_frame_document_ready(
         viewport_width,
         viewport_height,
         parent_frame_id,
+        element_nid,
     });
+    if element_nid != 0 {
+        gs.frame_element_nids.insert(frame_id, element_nid);
+    }
     frame_id
 }
 
@@ -3776,6 +3818,7 @@ fn op_frame_navigate(
     #[string] url: &str,
     #[number] viewport_width: u64,
     #[number] viewport_height: u64,
+    #[number] element_nid: u64,
 ) -> u32 {
     let parent_frame_id = realm_state(scope, state).borrow().frame_id;
     let gs = state.borrow::<SharedState>().clone();
@@ -3806,7 +3849,11 @@ fn op_frame_navigate(
         viewport_width,
         viewport_height,
         parent_frame_id,
+        element_nid,
     });
+    if element_nid != 0 {
+        gs.frame_element_nids.insert(frame_id, element_nid);
+    }
     frame_id
 }
 
@@ -4623,6 +4670,7 @@ pub fn build_extension() -> Extension {
         op_frame_document_ready(),
         op_frame_navigate(),
         op_post_frame_message(),
+        op_forget_frame_element_nid(),
         op_sleep(),
         op_async_runtime_available(),
         op_posted_task(),

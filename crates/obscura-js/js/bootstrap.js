@@ -4279,7 +4279,8 @@ class Element extends Node {
       try {
         const box = el.getBoundingClientRect();
         el._frameId = Deno.core.ops.op_frame_document_ready(
-          'about:blank', blankHtml, Math.round(box.width) || 300, Math.round(box.height) || 150);
+          'about:blank', blankHtml, Math.round(box.width) || 300, Math.round(box.height) || 150,
+          +el._nid || 0);
         if (el._frameId) globalThis.__obscura_frameElements[el._frameId] = el;
       } catch (e) { /* realm 排队失败则退回 shim 文档 */ }
     }
@@ -4303,7 +4304,8 @@ class Element extends Node {
     const el = this;
     const box = el.getBoundingClientRect();
     el._frameId = Deno.core.ops.op_frame_document_ready(
-      url, srcdoc, Math.round(box.width) || 300, Math.round(box.height) || 150);
+      url, srcdoc, Math.round(box.width) || 300, Math.round(box.height) || 150,
+      +el._nid || 0);
     if (el._frameId) globalThis.__obscura_frameElements[el._frameId] = el;
     el._iframeDoc = new _IframeDocument(srcdoc, url, el);
     el._iframeWin = new _IframeWindow(el._iframeDoc, url);
@@ -4331,7 +4333,8 @@ class Element extends Node {
     try {
       const box = el.getBoundingClientRect();
       el._frameId = Deno.core.ops.op_frame_navigate(
-        fullUrl, Math.round(box.width) || 300, Math.round(box.height) || 150);
+        fullUrl, Math.round(box.width) || 300, Math.round(box.height) || 150,
+        +el._nid || 0);
       if (el._frameId) {
         globalThis.__obscura_frameElements[el._frameId] = el;
         // 浏览器语义:iframe 是阻塞 window load 的资源。排队到宿主取回
@@ -13688,7 +13691,8 @@ class _IframeDocument extends Document {
         const box = this._iframeEl.getBoundingClientRect();
         const newId = Deno.core.ops.op_frame_document_ready(
           this._url || 'about:blank', full,
-          Math.round(box.width) || 300, Math.round(box.height) || 150);
+          Math.round(box.width) || 300, Math.round(box.height) || 150,
+          +this._iframeEl._nid || 0);
         if (newId) {
           const el = this._iframeEl;
           const oldId = el._frameId;
@@ -13973,7 +13977,7 @@ function _realmOrigin() {
   try { return new URL(_domParse('document_url')).origin; } catch (_) { return 'null'; }
 }
 
-function _sendRealmMessage(targetFrameId, data) {
+function _sendRealmMessage(targetFrameId, data, senderElementNid) {
   let json;
   // Structured clone cannot cross realms here. JSON carries what postMessage is
   // actually used for; anything else throws the same DataCloneError a browser
@@ -13984,8 +13988,13 @@ function _sendRealmMessage(targetFrameId, data) {
     throw new DOMException('The object could not be cloned.', 'DataCloneError');
   }
   if (json === undefined) json = '{"v":null}';
+  // senderElementNid: the `<iframe>` element's NodeId in the sender's owner
+  // realm — the receiver needs it to wrap `event.source` in its own world
+  // (per-world WindowProxy, Chromium window_proxy.cc). 0 lets the host fall
+  // back to the frame registration table for frames posting as themselves.
   Deno.core.ops.op_post_frame_message(
-    targetFrameId >>> 0, globalThis.__obscura_frameId >>> 0, _realmOrigin(), json);
+    targetFrameId >>> 0, globalThis.__obscura_frameId >>> 0,
+    (senderElementNid || 0) >>> 0, _realmOrigin(), json);
 }
 
 // The frame's own window and document, when this page is allowed to touch
@@ -14046,7 +14055,7 @@ function _stableWindowForElement(el) {
   if (!el) return null;
   if (el.__obscura_stableWin) return el.__obscura_stableWin;
   const post = _markNative(function (data, _targetOrigin, _transfer) {
-    _sendRealmMessage(el._frameId, data);
+    _sendRealmMessage(el._frameId, data, el._nid);
   });
   const win = new Proxy(globalThis, {
     get(_target, prop) {
@@ -14072,18 +14081,32 @@ function _stableWindowForElement(el) {
 }
 
 // The host calls this inside the target realm.
-globalThis.__obscura_deliverMessage = function(dataJson, origin, sourceFrameId) {
+globalThis.__obscura_deliverMessage = function(dataJson, origin, sourceFrameId, sourceElementNid) {
   let data = null;
   try { data = JSON.parse(dataJson).v; } catch (_) {}
   // Who to reply to: the frame above, or one of the frames below.
-  // `source` must be the SAME object the page reads as iframe.contentWindow —
-  // widgets compare them referentially (CF Turnstile drops otherwise).
+  // Chromium semantics (window_proxy.cc + bindings ToV8(WindowProxy)): the
+  // receiver gets ITS OWN wrapper for the sender's WindowProxy, generated in
+  // the receiving world. So resolve the sender's `<iframe>` node here — by
+  // element nid, wrapped in THIS realm — and hand out that wrapper's stable
+  // proxy. Identity then matches what the receiver read as contentWindow.
   const source = (globalThis.__obscura_frameId !== 0
                   && sourceFrameId === globalThis.__obscura_parentFrameId)
     ? globalThis.parent
-    : (globalThis.__obscura_frameElements[sourceFrameId]
-       ? _stableWindowForElement(globalThis.__obscura_frameElements[sourceFrameId])
-       : _frameWindowFor(sourceFrameId));
+    : (function () {
+        if (sourceElementNid) {
+          try {
+            var senderEl = _wrap(+sourceElementNid);
+            if (senderEl && senderEl.localName === 'iframe') {
+              return _stableWindowForElement(senderEl);
+            }
+          } catch (_) { /* nid not in this realm's tree; fall through */ }
+        }
+        if (globalThis.__obscura_frameElements[sourceFrameId]) {
+          return _stableWindowForElement(globalThis.__obscura_frameElements[sourceFrameId]);
+        }
+        return _frameWindowFor(sourceFrameId);
+      })();
   try {
     // Trusted, because the user agent delivers this event: the sender called
     // postMessage, it did not dispatch this. Real embedders check the flag and
