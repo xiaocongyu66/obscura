@@ -105,8 +105,7 @@ impl FrameRealm {
         let url_origin = origin_of(url);
         let inherits_parent = url == "about:blank"
             || url == "about:srcdoc"
-            || url.is_empty()
-            || !url.contains("://");
+            || url.is_empty();
         let origin = if inherits_parent {
             parent.page_origin()
         } else {
@@ -481,7 +480,7 @@ mod tests {
             1,
             0,
             "https://child.example/frame",
-            "<html><body><h1>Child</h1></body></html>", 0,
+            "<html><body><h1>Child</h1></body></html>",
             0,
         )
         .expect("frame realm");
@@ -535,7 +534,7 @@ mod tests {
             1,
             0,
             "https://child.example/frame",
-            "<html><body></body></html>", 0,
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
@@ -569,7 +568,7 @@ mod tests {
             1,
             0,
             "https://child.example/f",
-            "<html><body></body></html>", 0,
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
@@ -607,7 +606,7 @@ mod tests {
                <script src="/second.js"></script>
                <script>window.log.push('inline2');
                        document.getElementById('out').textContent = window.log.join(',');</script>
-               </body></html>"#, 0,
+               </body></html>"#,
             0,
         )
         .expect("frame realm");
@@ -659,7 +658,7 @@ mod tests {
                <script src="missing.js"></script>
                <script type="module">window.log.push('module');</script>
                <script>window.log.push('b');</script>
-               </body></html>"#, 0,
+               </body></html>"#,
             0,
         )
         .expect("frame realm");
@@ -730,7 +729,7 @@ mod tests {
             1,
             0,
             "https://child.example/",
-            "<html><body></body></html>", 0,
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
@@ -774,7 +773,7 @@ mod tests {
             1,
             0,
             "https://child.example/",
-            "<html><body></body></html>", 0,
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
@@ -799,7 +798,7 @@ mod tests {
             1,
             0,
             "https://child.example/",
-            "<html><body></body></html>", 0,
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
@@ -830,7 +829,7 @@ mod tests {
             1,
             0,
             "https://child.example/",
-            "<html><body></body></html>", 0,
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
@@ -870,7 +869,7 @@ mod tests {
             1,
             0,
             "https://child.example/f",
-            "<html><body></body></html>", 0,
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
@@ -908,7 +907,7 @@ mod tests {
             2,
             0,
             "https://child.example/f",
-            "<html><body></body></html>", 0,
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
@@ -937,7 +936,7 @@ mod tests {
             1,
             0,
             "https://child.example/f",
-            "<html><body></body></html>", 0,
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
@@ -974,7 +973,7 @@ mod tests {
                 1,
                 0,
                 "https://parent.example/child",
-                "<html><body><h1>Child</h1></body></html>", 0,
+                "<html><body><h1>Child</h1></body></html>",
             0,
         )
             .expect("frame realm");
@@ -1032,7 +1031,7 @@ mod tests {
             1,
             0,
             "https://parent.example/child",
-            "<html><head><title>BEFORE</title></head><body><p>child</p></body></html>", 0,
+            "<html><head><title>BEFORE</title></head><body><p>child</p></body></html>",
             0,
         )
         .expect("frame realm");
@@ -1071,7 +1070,7 @@ mod tests {
             1,
             0,
             "https://other.example/f",
-            "<html><body></body></html>", 0,
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
@@ -1096,17 +1095,36 @@ mod tests {
     #[test]
     fn opaque_origin_frames_are_never_same_origin() {
         let mut parent = page("https://parent.example/", "<html><body></body></html>");
+        // about:blank inherits the parent's origin per HTML spec, so use a
+        // genuinely opaque source (a data: URL document) for the never-same-
+        // origin half of this contract.
         let frame = FrameRealm::new(
             &mut parent,
             1,
             0,
-            "about:blank",
-            "<html><body></body></html>", 0,
+            "data:text/html,<html><body></body></html>",
+            "<html><body></body></html>",
             0,
         )
         .expect("frame realm");
         assert_eq!(frame.origin(), "null");
         assert!(!frame.is_same_origin_as("null"));
         assert!(!frame.is_same_origin_as("https://parent.example"));
+    }
+
+    #[test]
+    fn about_blank_frames_inherit_parent_origin() {
+        let mut parent = page("https://parent.example/", "<html><body></body></html>");
+        let frame = FrameRealm::new(
+            &mut parent,
+            1,
+            0,
+            "about:blank",
+            "<html><body></body></html>",
+            0,
+        )
+        .expect("frame realm");
+        assert_eq!(frame.origin(), "https://parent.example");
+        assert!(frame.is_same_origin_as("https://parent.example"));
     }
 }

@@ -5280,11 +5280,16 @@ class Document extends Node {
     return null;
   }
   get title() {
+    // HTML spec (the title element-4 getter): strip and collapse ASCII
+    // whitespace from the title element's child text.
+    var raw;
     if (this._detachedDoc) {
       const t = this.querySelector("title");
-      return t ? (t.textContent || "") : "";
+      raw = t ? (t.textContent || "") : "";
+    } else {
+      raw = _domParse("document_title") ?? "";
     }
-    return _domParse("document_title") ?? "";
+    return String(raw).replace(/[ \t\n\f\r]+/g, " ").replace(/^ | $/g, "");
   }
   set title(v) {
     const value = String(v);
@@ -13939,16 +13944,24 @@ const _iframeWindowProxyHandler = {
 // picks them up; a global added later would stay enumerable on `window`.
 globalThis.__obscura_frameId = 0;        // 0 is the page's own realm
 globalThis.__obscura_parentFrameId = 0;
-globalThis.__obscura_frameWindows = Object.create(null); // frame id -> its window
+globalThis.__obscura_frameWindows = globalThis.__obscura_frameWindows || Object.create(null); // frame id -> its window
 // frame id -> the iframe element that owns it. The host uses this composed-tree
 // registry to retain frames inside closed shadow roots without keeping removed
 // elements alive after their browsing context is released.
-globalThis.__obscura_frameElements = Object.create(null);
+// Browsing-context registries live on the TOP realm's global, shared by all
+// frame realms (Servo: ScriptWindowProxies is one table for the whole script
+// thread). Frame realms reach the same objects through their parent proxy.
+// A per-realm copy would split a frame's identity across realms — the exact
+// bug that made `event.source !== iframe.contentWindow` for CF Turnstile.
+globalThis.__obscura_frameElements = globalThis.__obscura_frameElements || Object.create(null);
+globalThis.__obscura_frameWindows = globalThis.__obscura_frameWindows || Object.create(null);
+globalThis.__obscura_frameObjects = globalThis.__obscura_frameObjects || Object.create(null);
+globalThis.__obscura_stableByNid = globalThis.__obscura_stableByNid || Object.create(null);
 // frame id -> that frame's real window and document, filled by the host.
 // Declared here rather than created by the host at runtime: the hide list is
 // computed from this global at snapshot time, so a property the host adds later
 // would stay enumerable on `window` and be visible to any script that walks it.
-globalThis.__obscura_frameObjects = Object.create(null);
+globalThis.__obscura_frameObjects = globalThis.__obscura_frameObjects || Object.create(null);
 // The frames of this realm whose element is still in the document.
 //
 // Liveness is asked of the element, not of a document query: an iframe inside
@@ -14094,16 +14107,23 @@ globalThis.__obscura_deliverMessage = function(dataJson, origin, sourceFrameId, 
                   && sourceFrameId === globalThis.__obscura_parentFrameId)
     ? globalThis.parent
     : (function () {
+        // Preferred: the element registered in THIS realm when the frame was
+        // created — its stable proxy is the very object contentWindow hands
+        // out, so `event.source === iframe.contentWindow` holds.
+        var registered = globalThis.__obscura_frameElements[sourceFrameId];
+        if (registered) {
+          return _stableWindowForElement(registered);
+        }
+        // Fallback: sender stamped its element nid (element lives in another
+        // realm's tree). Wrapping it here only makes sense when this realm
+        // shares that DOM tree; otherwise it yields an orphan wrapper.
         if (sourceElementNid) {
           try {
             var senderEl = _wrap(+sourceElementNid);
-            if (senderEl && senderEl.localName === 'iframe') {
+            if (senderEl && senderEl.localName === 'iframe' && senderEl.isConnected) {
               return _stableWindowForElement(senderEl);
             }
-          } catch (_) { /* nid not in this realm's tree; fall through */ }
-        }
-        if (globalThis.__obscura_frameElements[sourceFrameId]) {
-          return _stableWindowForElement(globalThis.__obscura_frameElements[sourceFrameId]);
+          } catch (_) { /* not in this realm's tree */ }
         }
         return _frameWindowFor(sourceFrameId);
       })();
@@ -16764,6 +16784,16 @@ globalThis.__obscura_init = function() {
     try {
       var __parent = globalThis.parent;
       if (__parent && __parent !== globalThis) {
+        // Shared browsing-context registries: one table for the whole frame
+        // tree (Servo ScriptWindowProxies model). Without this, a frame's
+        // registration lands in a realm-local table and the page realm can't
+        // see it — `event.source` then fails identity against contentWindow.
+        try {
+          globalThis.__obscura_frameElements = __parent.__obscura_frameElements || globalThis.__obscura_frameElements;
+          globalThis.__obscura_frameWindows = __parent.__obscura_frameWindows || globalThis.__obscura_frameWindows;
+          globalThis.__obscura_frameObjects = __parent.__obscura_frameObjects || globalThis.__obscura_frameObjects;
+          globalThis.__obscura_stableByNid = __parent.__obscura_stableByNid || globalThis.__obscura_stableByNid;
+        } catch (e) {}
         ['DOMException', 'TypeError', 'RangeError', 'Event', 'EventTarget',
          'Node', 'Element', 'Document', 'NodeList', 'HTMLCollection']
           .forEach(function(name) {
