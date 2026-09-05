@@ -7510,7 +7510,8 @@ function _webglParamDefault(p) {
   var UNMASKED_VENDOR_WEBGL = 0x9245, UNMASKED_RENDERER_WEBGL = 0x9246;
   var VENDOR_STR = globalThis.__obscura_webgl_vendor || 'Intel Inc.';
   var RENDERER_STR = globalThis.__obscura_webgl_renderer || 'Intel(R) HD Graphics 530';
-  var VERSION_STR = 'WebGL 1.0', GLSL_STR = 'WebGL GLSL ES 1.0';
+  var VERSION_STR = this && this._isWebGL2 ? 'WebGL 2.0 (OpenGL ES 3.0 Chromium)' : 'WebGL 1.0 (OpenGL ES 2.0 Chromium)';
+  var GLSL_STR = this && this._isWebGL2 ? 'WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)' : 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)';
   switch (p) {
     case VENDOR: return VENDOR_STR;
     case RENDERER: return RENDERER_STR;
@@ -7541,6 +7542,23 @@ function _webglParamDefault(p) {
   }
 }
 
+var _WEBGL2_EXTENSIONS = [
+  'EXT_color_buffer_float',
+  'EXT_color_buffer_half_float',
+  'EXT_disjoint_timer_query_webgl2',
+  'EXT_float_blend',
+  'EXT_texture_compression_bptc',
+  'EXT_texture_compression_rgtc',
+  'EXT_texture_filter_anisotropic',
+  'KHR_parallel_shader_compile',
+  'OES_texture_float_linear',
+  'WEBGL_compressed_texture_s3tc',
+  'WEBGL_compressed_texture_s3tc_srgb',
+  'WEBGL_debug_renderer_info',
+  'WEBGL_debug_shaders',
+  'WEBGL_lose_context',
+  'WEBGL_multi_draw',
+];
 var _WEBGL_EXTENSIONS = [
   'ANGLE_instanced_arrays',
   'EXT_blend_minmax',
@@ -7576,6 +7594,7 @@ function _makeWebGLContext(type) {
   var ctx = {
     _isWebGLStub: true,
     _type: type,
+    _isWebGL2: type === 'webgl2',
     canvas: null, // set by caller
     drawingBufferWidth: 300,
     drawingBufferHeight: 150,
@@ -7659,6 +7678,11 @@ function _makeWebGLContext(type) {
       return {};
     },
     getSupportedExtensions: function() {
+      // WebGL2 core-ifies most OES_/WEBGL1 extensions and adds its own set.
+      // Serving the WebGL1 list from a webgl2 context is an easy tell.
+      if (this._isWebGL2) {
+        return _WEBGL2_EXTENSIONS.slice();
+      }
       return _WEBGL_EXTENSIONS.slice();
     },
     getContextAttributes: function() {
@@ -7750,6 +7774,34 @@ function _makeWebGLContext(type) {
       return 0;
     },
     getShaderInfoLog: function() { return ''; },
+    // WebGL2 API surface (no OES suffix). CF/challenge scripts probe these to
+    // distinguish a real webgl2 context from a stubbed WebGL1.
+    createVertexArray: function() { return { _id: nextHandle() }; },
+    deleteVertexArray: function() {},
+    isVertexArray: function() { return false; },
+    bindVertexArray: function() {},
+    createQuery: function() { return { _id: nextHandle() }; },
+    deleteQuery: function() {},
+    beginQuery: function() {},
+    endQuery: function() {},
+    getQueryParameter: function() { return false; },
+    createTransformFeedback: function() { return { _id: nextHandle() }; },
+    bindTransformFeedback: function() {},
+    fenceSync: function() { return { _id: nextHandle() }; },
+    isSync: function() { return false; },
+    clearBufferfv: function() {},
+    clearBufferuiv: function() {},
+    readBuffer: function() {},
+    texImage3D: function() {},
+    texSubImage3D: function() {},
+    texStorage2D: function() {},
+    texStorage3D: function() {},
+    renderbufferStorageMultisample: function() {},
+    blitFramebuffer: function() {},
+    drawBuffers: function() {},
+    vertexAttribDivisor: function() {},
+    drawArraysInstanced: function() {},
+    drawElementsInstanced: function() {},
     getShaderPrecisionFormat: function(shaderType, precisionType) {
       return { rangeMin: 127, rangeMax: 127, precision: 23 };
     },
