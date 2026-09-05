@@ -4371,10 +4371,12 @@ class Element extends Node {
   }
   get contentWindow() {
     if (this.localName !== 'iframe') return undefined;
-    // One identity for the element's lifetime: pre-realm reads get the
-    // stable proxy too (its traps fall back to the shim window), so a
-    // widget that captures contentWindow early still compares equal to
-    // event.source after the realm publishes.
+    // WindowProxy semantics (Chromium: window_proxy.cc): the object handed
+    // out is bound to the FRAME, not to any document, and keeps one
+    // referential identity for the element's lifetime. The stable proxy's
+    // traps forward to the current realm's window (shim document before the
+    // realm publishes), so a reference captured pre-realm stays === to
+    // event.source after navigation — which is what CF Turnstile checks.
     if (this.parentNode === null && !this._iframeWin && !this.isConnected) return null;
     return _stableWindowForElement(this);
   }
