@@ -86,7 +86,22 @@ impl FrameRealm {
         // keeps its own security token, so V8 answers `undefined` for any
         // property the page tries to read out of it, and nothing about it is
         // published below.
-        let origin = origin_of(url);
+        //
+        // Per HTML spec, about:blank and about:srcdoc frames INHERIT the
+        // parent's origin — they are not opaque. CF Turnstile builds its
+        // whole challenge out of about:blank iframes written via
+        // contentDocument.write(); treating them as "null"-origin made every
+        // such frame cross-origin: no publish, no bridge, dead widget.
+        let url_origin = origin_of(url);
+        let inherits_parent = url == "about:blank"
+            || url == "about:srcdoc"
+            || url.is_empty()
+            || !url.contains("://");
+        let origin = if inherits_parent {
+            parent.page_origin()
+        } else {
+            url_origin
+        };
         let same_origin = origin != "null" && origin == parent.page_origin();
         if same_origin {
             parent.share_security_token_with_realm(&context);
