@@ -983,6 +983,25 @@ impl ObscuraJsRuntime {
         );
     }
 
+    /// Pins navigator.language(s) to the exit-IP region (mirrors the TZ pin
+    /// in the CLI): a Windows UA browsing from an Asia/Shanghai exit while
+    /// claiming en-US is a cross-surface mismatch CF fingerprints.
+    pub fn set_locale(&mut self, locale: &str, locales: &[&str]) {
+        let l = locale.replace('\'', "\\'");
+        let arr = locales
+            .iter()
+            .map(|s| format!("'{}'", s.replace('\'', "\\'")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = self.execute_runtime_script(
+            "<set-locale>",
+            format!(
+                "globalThis.__obscura_locale='{}';globalThis.__obscura_locales=[{}];",
+                l, arr
+            ),
+        );
+    }
+
     pub fn set_stealth(&mut self, enabled: bool) {
         let _ = self.execute_runtime_script(
             "<set-stealth>",

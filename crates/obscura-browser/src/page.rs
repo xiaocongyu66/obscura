@@ -17,6 +17,26 @@ use crate::lifecycle::LifecycleState;
 /// Returns None when unset or malformed, leaving the built-in default in place.
 /// Lets a deployment align the reported coordinates with the region its exit IP
 /// resolves to, so timezone and location stay consistent (issue #228).
+/// Derives navigator.language(s) from the pinned TZ region (OBSCURA_TIMEZONE
+/// / TZ), so a browser exiting through an Asia/Shanghai proxy reports zh-CN
+/// instead of the engine default en-US — matching the exit IP geography.
+fn env_locale() -> Option<(String, Vec<String>)> {
+    let tz = std::env::var("OBSCURA_TIMEZONE")
+        .or_else(|_| std::env::var("TZ"))
+        .ok()?;
+    let region = tz.split('/').nth(1)?.replace('_', "-");
+    // Primary tag from the region, plus a broad fallback language.
+    let primary = match region.split_once('-') {
+        Some((lang, _)) => lang.to_ascii_lowercase(),
+        None => region.to_ascii_lowercase(),
+    };
+    let primary_full = format!("{}-{}", primary, region.split('-').next_back().unwrap_or(&region));
+    Some((
+        primary_full.clone(),
+        vec![primary_full, primary],
+    ))
+}
+
 fn env_geolocation() -> Option<(f64, f64)> {
     let raw = std::env::var("OBSCURA_GEOLOCATION").ok()?;
     let (lat, lon) = raw.split_once(',')?;
@@ -1572,6 +1592,10 @@ impl Page {
         }
         if let Some((lat, lon)) = env_geolocation() {
             rt.set_geolocation(lat, lon);
+        }
+        if let Some((locale, locales)) = env_locale() {
+            let refs: Vec<&str> = locales.iter().map(|s| s.as_str()).collect();
+            rt.set_locale(&locale, &refs);
         }
         rt.set_viewport(self.viewport.0 as f64, self.viewport.1 as f64);
         rt.set_screen_size_override(

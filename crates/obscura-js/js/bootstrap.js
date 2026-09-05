@@ -7412,8 +7412,11 @@ globalThis.navigator = {
   defGetter('platform', function() {
     return globalThis.__obscura_platform || "Win32";
   });
-  defGetter('language', function() { return "en-US"; });
-  defGetter('languages', function() { return ["en-US", "en"]; });
+  // Locale follows the pinned TZ region (set via OBSCURA_TIMEZONE) so
+  // navigator.language matches the exit-IP geography, matching Date/Intl.
+  // Falls back to en-US when no override arrives from the host.
+  defGetter('language', function() { return globalThis.__obscura_locale || "en-US"; });
+  defGetter('languages', function() { return globalThis.__obscura_locales || ["en-US", "en"]; });
 
   // Cache plugins/mimeTypes so navigator.plugins === navigator.plugins.
   var _plugins = new PluginArray([
