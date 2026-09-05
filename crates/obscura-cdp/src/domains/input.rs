@@ -345,13 +345,50 @@ pub async fn handle(
                 let d = p.get(2).and_then(|v| v.as_u64()).unwrap_or(10);
                 coords.push_str(&format!("[{},{},{}],", x, y, d));
             }
+            let press = params
+                .get("press")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let press_delay = params
+                .get("pressDelayMs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(80);
+            let target_x = params
+                .get("x")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let target_y = params
+                .get("y")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
             if let Some(page) = ctx.get_session_page_mut(session_id) {
+                // When `press` is set the gesture completes inside this one
+                // evaluate: trajectory → mousedown → press gap → mouseup →
+                // click. Runtime.evaluate would stall each of those behind
+                // its frame pump (1.5s+ on busy pages), so interactive
+                // gestures must not go through it.
+                let click_seq = if press {
+                    format!(
+                        "function fire() {{\
+                            var x = {target_x}, y = {target_y};\
+                            var target = globalThis.__obscura_click_target || document.body;\
+                            target.dispatchEvent(globalThis.__obscura_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:1,detail:1}})));\
+                            setTimeout(function() {{\
+                                target.dispatchEvent(globalThis.__obscura_markTrusted(new MouseEvent('mouseup', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:0,detail:1}})));\
+                                target.dispatchEvent(globalThis.__obscura_markTrusted(new MouseEvent('click', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:0,detail:1}})));\
+                            }}, {press_delay});\
+                        }}\
+                        setTimeout(fire, 60);"
+                    )
+                } else {
+                    String::new()
+                };
                 let code = format!(
                     "(function() {{\
                         var pts = [{coords}];\
                         var i = 0;\
                         function step() {{\
-                            if (i >= pts.length) return;\
+                            if (i >= pts.length) {{ {click_seq} return; }}\
                             var p = pts[i++];\
                             var target = (document.elementFromPoint && document.elementFromPoint(p[0], p[1])) || document.body;\
                             if (target) {{\
