@@ -6,7 +6,6 @@ use std::sync::Arc;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use deno_core::op2;
 use deno_core::Extension;
-#[cfg(feature = "render")]
 use deno_core::JsBuffer;
 use deno_core::v8;
 use deno_core::OpState;
@@ -4695,6 +4694,7 @@ pub fn build_extension() -> Extension {
         op_get_elements_by_tag_name(),
         op_get_elements_by_tag_name_scoped(),
         // WebGL ops — always available (pure Rust, no system GL).
+        op_canvas_encode_png(),
         op_webgl_create_context(),
         op_webgl_delete_context(),
         op_webgl_viewport(),
@@ -6861,4 +6861,27 @@ fn op_image_size_for_element(state: &OpState, nid: u32) -> String {
         Some((w, h)) => serde_json::json!({ "ok": true, "width": w, "height": h }).to_string(),
         None => serde_json::json!({ "ok": false, "error": "undecoded", "bytes": bytes.len() }).to_string(),
     }
+}
+
+/// Encodes an RGBA8 buffer as a real zlib-compressed PNG, returned as a
+/// data: URL. The JS fallback emits stored (level-0) DEFLATE — a decode-visible
+/// tell; browsers ship compressed IDATs, so the canvas path routes through here.
+#[op2]
+#[string]
+fn op_canvas_encode_png(
+    #[buffer] rgba: JsBuffer,
+    width: u32,
+    height: u32,
+) -> Option<String> {
+    let rgba = rgba.to_vec();
+    let mut out = Vec::with_capacity(rgba.len() / 2);
+    {
+        let mut enc = png::Encoder::new(&mut out, width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.set_compression(png::Compression::Balanced);
+        let mut writer = enc.write_header().ok()?;
+        writer.write_image_data(&rgba).ok()?;
+    }
+    Some(format!("data:image/png;base64,{}", BASE64.encode(&out)))
 }

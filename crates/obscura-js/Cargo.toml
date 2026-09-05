@@ -31,6 +31,9 @@ url = { workspace = true }
 # as github.io), not just compare dotted strings.  `psl` embeds the Mozilla
 # Public Suffix List and adds no runtime I/O.
 psl = "2"
+# canvas.toDataURL: real zlib-compressed PNG (the JS stored-block encoder was
+# a decode-visible tell; `png` is already in the tree via `image`).
+png = "0.18"
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

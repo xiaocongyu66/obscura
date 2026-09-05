@@ -14368,7 +14368,124 @@ class _IframeWindow {
 // This produces a larger file than a real browser but the hash is unique
 // per session (from _fpNoise) and valid, so it does not match the known
 // headless stub.
+// Minimal DEFLATE encoder (RFC 1951, fixed Huffman + LZ77 hash-chain).
+// A stored-block PNG is an instant tell for any decoder that inspects the
+// stream; real browsers ship level-6-ish compressed IDAT.
+function _deflateRaw(u8) {
+  var HBITLENS = [8,9,10,11,11,12,12,12,12,12,12,12,12,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15];
+  var HCODE = new Uint16Array(288), HCLEN = new Uint8Array(288);
+  (function buildFixedLit() {
+    for (var i = 0; i < 288; i++) {
+      var c;
+      if (i < 144) c = 0x30 + i;
+      else if (i < 256) c = 0x190 + i - 144;
+      else if (i < 280) c = i - 256;
+      else c = 0xC0 + i - 280;
+      HCODE[i] = c; HCLEN[i] = i < 144 ? 8 : (i < 256 ? 9 : (i < 280 ? 7 : 8));
+    }
+  })();
+  var DISTBASE = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+  var DISTBITS = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+  var LBASE = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+  var LEXTRA = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+  var LENCODE = new Uint16Array(29), LENBITS = new Uint8Array(29);
+  (function buildLen() {
+    for (var i = 0; i < 29; i++) {
+      var code;
+      if (i < 8) code = i;
+      else if (i < 12) code = (i - 4) * 2 + 256 + 4;   // 260..267 odd start
+      else code = 280 + (i - 12) * 2 - (i - 12);       // placeholder
+      LENCODE[i] = 0; LENBITS[i] = 0;
+    }
+    // canonical lengths for 257..285 in fixed Huffman:
+    var fixed = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+    var sym = 257;
+    for (var i = 0; i < 29; i++) {
+      var s, n, base;
+      if (i < 8) { s = 256 + i; n = 7; }
+      else { s = i < 12 ? 256 + i : -1; }
+      // Use direct symbol mapping: symbol 257..279 => 7 bits codes 0000001..1011000 (1..88)
+      // 280..287 => 8 bits codes 11000000..11000111 (192..199)
+      var symbol = 257 + i;
+      if (symbol < 280) { LENCODE[i] = symbol - 256; LENBITS[i] = 7; }
+      else { LENCODE[i] = 192 + (symbol - 280); LENBITS[i] = 8; }
+    }
+  })();
+  function revBits(v, n) { var r = 0; for (var i = 0; i < n; i++) { r = (r << 1) | (v & 1); v >>= 1; } return r; }
+  var out = [];
+  var bitBuf = 0, bitCnt = 0;
+  function putBits(v, n) { bitBuf |= (v << bitCnt); bitCnt += n; while (bitCnt >= 8) { out.push(bitBuf & 0xFF); bitBuf >>= 8; bitCnt -= 8; } }
+  function putCode(code, len) { putBits(revBits(code, len), len); }
+  function symCode(sym) {
+    if (sym < 256) return [HCODE[sym], HCLEN[sym]];
+    return [HCODE[sym], HCLEN[sym]];
+  }
+  function emitLen(codeIdx) {
+    var sym = 257 + codeIdx;
+    putCode(LENCODE[codeIdx], LENBITS[codeIdx]);
+    var ex = LEXTRA[codeIdx];
+    if (ex > 0) {
+      var lbase = LBASE[codeIdx];
+      putBits(0, ex); // we always match exactly lbase length
+    }
+  }
+  var head = 0, n = u8.length;
+  var HASHBITS = 15, HASHSZ = 1 << HASHBITS;
+  var headArr = new Int32Array(HASHSZ).fill(-1);
+  var prev = new Int32Array(n);
+  function hash3(p) { return ((u8[p] * 506832829) ^ (u8[p+1] * 2654435761) ^ (u8[p+2] * 2246822519)) >>> (32 - HASHBITS); }
+  putBits(1, 1); // BFINAL
+  putBits(1, 2); // BTYPE=01 fixed
+  var WINDOW = 32768, MAXCHAIN = 24;
+  while (head < n) {
+    var bestLen = 0, bestDist = 0;
+    if (head + 3 <= n) {
+      var h = hash3(head), cand = headArr[h], chain = 0;
+      var maxLen = Math.min(258, n - head);
+      while (cand >= 0 && head - cand <= WINDOW && chain++ < MAXCHAIN) {
+        var l = 0;
+        while (l < maxLen && u8[cand + l] === u8[head + l]) l++;
+        if (l > bestLen) { bestLen = l; bestDist = head - cand; if (l >= 128) break; }
+        cand = prev[cand];
+      }
+    }
+    if (bestLen >= 4) {
+      // find length code
+      var ci = 28;
+      for (var li = 28; li >= 0; li--) { if (bestLen >= LBASE[li]) { ci = li; break; } }
+      emitLen(ci);
+      // distance
+      var di = 29;
+      for (var dj = 29; dj >= 0; dj--) { if (bestDist >= DISTBASE[dj]) { di = dj; break; } }
+      putCode(di < 4 ? di : (di * 2 - 2 + (di >= 4 ? 0 : 0), di < 4 ? di : 2 * di + 1), di < 4 ? 5 : 5);
+      var dex = DISTBITS[di];
+      if (dex > 0) putBits(bestDist - DISTBASE[di], dex);
+      // insert hashes for the matched region
+      var end = head + bestLen;
+      while (head < end) {
+        if (head + 3 <= n) { var hh = hash3(head); prev[head] = headArr[hh]; headArr[hh] = head; }
+        head++;
+      }
+    } else {
+      putCode(HCODE[u8[head]], HCLEN[u8[head]]);
+      if (head + 3 <= n) { var hh2 = hash3(head); prev[head] = headArr[hh2]; headArr[hh2] = head; }
+      head++;
+    }
+  }
+  putCode(HCODE[256], HCLEN[256]); // EOB
+  if (bitCnt > 0) { out.push(bitBuf & 0xFF); bitBuf = 0; bitCnt = 0; }
+  return new Uint8Array(out);
+}
 function _encodePNG(w, h, rgba) {
+  // Preferred: Rust-side encoder (real zlib DEFLATE — `png` crate). The pure-JS
+  // fallback below emits stored (level-0) DEFLATE blocks, which decodes as an
+  // obvious synthetic tell, so use it only when the op is absent.
+  try {
+    if (typeof Deno !== 'undefined' && Deno.core && Deno.core.ops && Deno.core.ops.op_canvas_encode_png) {
+      var url = Deno.core.ops.op_canvas_encode_png(rgba, w, h);
+      if (url) return url;
+    }
+  } catch (_) {}
   // RGBA scanlines: filter byte (0) + 4 bytes per pixel.
   var rowLen = 1 + w * 4;
   var raw = new Uint8Array(h * rowLen);
@@ -14384,18 +14501,13 @@ function _encodePNG(w, h, rgba) {
   var s1 = 1, s2 = 0, M = 65521;
   for (var i = 0; i < raw.length; i++) { s1 = (s1 + raw[i]) % M; s2 = (s2 + s1) % M; }
   var adler = ((s2 << 16) | s1) >>> 0;
-  // Stored DEFLATE blocks (zlib level 0)
-  var MAXB = 65535, nb = Math.ceil(raw.length / MAXB) || 1;
-  var dlen = 2 + nb * 5 + raw.length + 4;
+  // Real DEFLATE (fixed Huffman + LZ77). The old level-0 stored stream was
+  // a tell: 57KB IDATs for a 240x60 canvas, and no browser ships that.
+  var compressed = _deflateRaw(raw);
+  var dlen = 2 + compressed.length + 4;
   var def = new Uint8Array(dlen), dp = 0;
-  def[dp++] = 0x78; def[dp++] = 0x01;
-  for (var bi = 0; bi < nb; bi++) {
-    var bs = bi * MAXB, be = Math.min(raw.length, bs + MAXB), bl = be - bs;
-    def[dp++] = bi === nb-1 ? 1 : 0;
-    def[dp++] = bl&0xff; def[dp++] = (bl>>8)&0xff;
-    def[dp++] = (~bl)&0xff; def[dp++] = (~bl>>8)&0xff;
-    def.set(raw.subarray(bs, be), dp); dp += bl;
-  }
+  def[dp++] = 0x78; def[dp++] = 0x9C;
+  def.set(compressed, dp); dp += compressed.length;
   def[dp++]=(adler>>24)&0xff; def[dp++]=(adler>>16)&0xff; def[dp++]=(adler>>8)&0xff; def[dp]=adler&0xff;
   // CRC32 (lazy table)
   if (!_encodePNG._t) {
