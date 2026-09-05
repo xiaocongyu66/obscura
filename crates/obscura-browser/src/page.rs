@@ -21,6 +21,16 @@ use crate::lifecycle::LifecycleState;
 /// / TZ), so a browser exiting through an Asia/Shanghai proxy reports zh-CN
 /// instead of the engine default en-US — matching the exit IP geography.
 fn env_locale() -> Option<(String, Vec<String>)> {
+    // Host-mapped locale (countryCode → BCP47 at launch) wins; the TZ-name
+    // heuristic below is only a fallback because an IANA zone's segments are
+    // region/city, and a city name is not a language code.
+    if let Ok(locale) = std::env::var("OBSCURA_LOCALE") {
+        let locale = locale.trim();
+        if !locale.is_empty() && locale.matches('-').count() == 1 {
+            let lang = locale.split('-').next().unwrap_or("en").to_ascii_lowercase();
+            return Some((locale.to_string(), vec![locale.to_string(), lang]));
+        }
+    }
     let tz = std::env::var("OBSCURA_TIMEZONE")
         .or_else(|_| std::env::var("TZ"))
         .ok()?;
