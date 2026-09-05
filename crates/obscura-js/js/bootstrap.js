@@ -672,7 +672,16 @@ function _getFp() {
     'Google Inc. (Intel)','Google Inc. (AMD)','Google Inc. (NVIDIA)',
   ];
   const idx = Math.floor(_fpRand(42) * gpuPool.length);
-  const screenPool = [[1920,1080],[2560,1440],[1366,768],[1536,864],[1440,900],[1680,1050],[1280,720],[3840,2160]];
+  // Screen pool coherent with the spoofed platform: a Windows UA paired with
+  // 1680x1050 (old MacBook) or 2560x1440 depth-30 (Pro Display XDR) reads as
+  // a mis-assembled fingerprint. Windows boxes are overwhelmingly 1080p-class.
+  const isMacUA = /Macintosh|Mac OS X/.test(navigator.userAgent);
+  const isLinUA = /Linux/.test(navigator.userAgent);
+  const screenPool = isMacUA
+    ? [[2560,1440],[1920,1080],[1728,1117],[2056,1329]]
+    : isLinUA
+      ? [[1920,1080],[2560,1440],[1366,768],[1600,900]]
+      : [[1920,1080],[1536,864],[1366,768],[1600,900],[1920,1200],[2560,1440]];
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   let cfp = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg';
   for (let i = 0; i < 40; i++) cfp += chars[Math.floor(_fpRand(500 + i) * 64)];
@@ -4809,7 +4818,23 @@ class Element extends Node {
     // from the node id so Playwright's actionability polling still gets a
     // stable, distinct rect for hit-testing (issue #45).
     // Every nid maps to a unique cell in a 12-column grid for a 1280x720 viewport.
-    const VW = 1280, VH = 720, COLS = 12, CW = 100, CH = 20, GX = 110, GY = 30;
+    // Font-sensitive width: measure scripts (font detection via offsetWidth,
+    // canvas text metrics) vary the font-family on one element and compare
+    // widths. A constant width reads as "no font metrics" — a strong bot
+    // signal (Camoufox ships per-OS font lists for the same reason). Hash the
+    // resolved font-family into a stable per-font multiplier.
+    const VW = 1280, VH = 720, COLS = 12, GX = 110, GY = 30;
+    let CW = 100, CH = 20;
+    try {
+      const cs = typeof getComputedStyle === 'function' ? getComputedStyle(this) : null;
+      const fam = (cs && cs.fontFamily) || (this.style && this.style.fontFamily) || '';
+      if (fam) {
+        let h = 5381;
+        for (let i = 0; i < fam.length; i++) h = ((h * 33) ^ fam.charCodeAt(i)) >>> 0;
+        CW = Math.round(88 + (h % 30));          // 88-117px per family
+        CH = Math.round(16 + ((h >>> 8) % 12));  // 16-27px line height variance
+      }
+    } catch (_) {}
     const rowsPerScreen = Math.max(1, Math.floor((VH - 10) / GY));
     const cell = this._nid | 0;
     const col = ((cell * 7) | 0) % COLS;
