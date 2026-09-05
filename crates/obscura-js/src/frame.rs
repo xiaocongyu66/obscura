@@ -67,8 +67,9 @@ impl FrameRealm {
         parent_frame_id: u32,
         url: &str,
         html: &str,
+        element_nid: u64,
     ) -> Option<Self> {
-        Self::new_with_encoding(parent, frame_id, parent_frame_id, url, html, None)
+        Self::new_with_encoding(parent, frame_id, parent_frame_id, url, html, None, element_nid)
     }
 
     /// `encoding`:iframe 文档自身的字符编码名(WHATWG canonical name)。
@@ -82,6 +83,7 @@ impl FrameRealm {
         url: &str,
         html: &str,
         encoding: Option<&str>,
+        element_nid: u64,
     ) -> Option<Self> {
         let context = parent.create_realm_context()?;
         if !parent.share_ops_with_realm(&context) {
@@ -170,7 +172,7 @@ impl FrameRealm {
                 url.to_string()
             },
             origin,
-            element_nid: frame.element_nid,
+            element_nid,
         };
         // Both ids before init, not after: init is what installs `parent` and
         // `top`, and a document that runs even one script believing it is
@@ -479,7 +481,8 @@ mod tests {
             1,
             0,
             "https://child.example/frame",
-            "<html><body><h1>Child</h1></body></html>",
+            "<html><body><h1>Child</h1></body></html>", 0,
+            0,
         )
         .expect("frame realm");
 
@@ -532,7 +535,8 @@ mod tests {
             1,
             0,
             "https://child.example/frame",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
 
@@ -565,7 +569,8 @@ mod tests {
             1,
             0,
             "https://child.example/f",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
 
@@ -602,7 +607,8 @@ mod tests {
                <script src="/second.js"></script>
                <script>window.log.push('inline2');
                        document.getElementById('out').textContent = window.log.join(',');</script>
-               </body></html>"#,
+               </body></html>"#, 0,
+            0,
         )
         .expect("frame realm");
 
@@ -653,7 +659,8 @@ mod tests {
                <script src="missing.js"></script>
                <script type="module">window.log.push('module');</script>
                <script>window.log.push('b');</script>
-               </body></html>"#,
+               </body></html>"#, 0,
+            0,
         )
         .expect("frame realm");
 
@@ -685,6 +692,7 @@ mod tests {
                     0,
                     &format!("https://f{index}.example/"),
                     &format!("<html><body><h1>{index}</h1></body></html>"),
+                    0,
                 )
                 .expect("frame realm")
             })
@@ -722,7 +730,8 @@ mod tests {
             1,
             0,
             "https://child.example/",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
 
@@ -765,7 +774,8 @@ mod tests {
             1,
             0,
             "https://child.example/",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
         frame
@@ -789,7 +799,8 @@ mod tests {
             1,
             0,
             "https://child.example/",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
         frame
@@ -819,7 +830,8 @@ mod tests {
             1,
             0,
             "https://child.example/",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
         frame
@@ -858,7 +870,8 @@ mod tests {
             1,
             0,
             "https://child.example/f",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
 
@@ -895,7 +908,8 @@ mod tests {
             2,
             0,
             "https://child.example/f",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
         assert_eq!(
@@ -923,7 +937,8 @@ mod tests {
             1,
             0,
             "https://child.example/f",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
 
@@ -959,8 +974,9 @@ mod tests {
                 1,
                 0,
                 "https://parent.example/child",
-                "<html><body><h1>Child</h1></body></html>",
-            )
+                "<html><body><h1>Child</h1></body></html>", 0,
+            0,
+        )
             .expect("frame realm");
             frame
                 .execute_script(&mut parent, "globalThis.marker = 'child';")
@@ -1016,7 +1032,8 @@ mod tests {
             1,
             0,
             "https://parent.example/child",
-            "<html><head><title>BEFORE</title></head><body><p>child</p></body></html>",
+            "<html><head><title>BEFORE</title></head><body><p>child</p></body></html>", 0,
+            0,
         )
         .expect("frame realm");
         frame
@@ -1054,7 +1071,8 @@ mod tests {
             1,
             0,
             "https://other.example/f",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
         frame
@@ -1083,7 +1101,8 @@ mod tests {
             1,
             0,
             "about:blank",
-            "<html><body></body></html>",
+            "<html><body></body></html>", 0,
+            0,
         )
         .expect("frame realm");
         assert_eq!(frame.origin(), "null");

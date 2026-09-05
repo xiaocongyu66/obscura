@@ -1067,6 +1067,7 @@ impl Page {
                         frame.parent_frame_id,
                         &frame.url,
                         &frame.html,
+                        frame.element_nid,
                     )
                 } else {
                     FrameRealm::new_with_encoding(
@@ -1076,6 +1077,7 @@ impl Page {
                         &frame.url,
                         &frame.html,
                         Some(&frame.encoding),
+                        frame.element_nid,
                     )
                 }
             }) {
