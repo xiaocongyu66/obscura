@@ -4371,15 +4371,12 @@ class Element extends Node {
   }
   get contentWindow() {
     if (this.localName !== 'iframe') return undefined;
-    if (_frameObjectsFor(this)) {
-      const win = _stableWindowForElement(this);
-      if (win) return win;
-    }
-    if (!this._iframeWin) {
-      if (this.parentNode === null) return null;
-      this.contentDocument;
-    }
-    return this._iframeWin;
+    // One identity for the element's lifetime: pre-realm reads get the
+    // stable proxy too (its traps fall back to the shim window), so a
+    // widget that captures contentWindow early still compares equal to
+    // event.source after the realm publishes.
+    if (this.parentNode === null && !this._iframeWin && !this.isConnected) return null;
+    return _stableWindowForElement(this);
   }
   get action() {
     const action = this.getAttribute("action") || _domParse("document_url") || "";
