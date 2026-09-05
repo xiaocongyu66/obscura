@@ -4372,7 +4372,7 @@ class Element extends Node {
   get contentWindow() {
     if (this.localName !== 'iframe') return undefined;
     if (_frameObjectsFor(this)) {
-      const win = _frameWindowFor(this._frameId);
+      const win = _stableWindowForElement(this);
       if (win) return win;
     }
     if (!this._iframeWin) {
@@ -14037,15 +14037,54 @@ function _frameWindowFor(frameId) {
   return win;
 }
 
+// A window proxy with PERMANENT identity for one iframe element. Real
+// browsers keep `iframe.contentWindow` (and `event.source`) referentially
+// identical across navigations of the frame; obscura swaps realms per
+// document, so the wrapper must be per-element with a dynamic target, or
+// every widget that checks `event.source === iframe.contentWindow`
+// (CF Turnstile does) drops the frame's messages as spoofed.
+function _stableWindowForElement(el) {
+  if (!el) return null;
+  if (el.__obscura_stableWin) return el.__obscura_stableWin;
+  const post = _markNative(function (data, _targetOrigin, _transfer) {
+    _sendRealmMessage(el._frameId, data);
+  });
+  const win = new Proxy(globalThis, {
+    get(_target, prop) {
+      if (prop === 'postMessage') return post;
+      if (prop === '__obscura_wrapsRealm') return true;
+      if (prop === '__obscura_frameElement') return el;
+      const real = globalThis.__obscura_frameObjects?.[el._frameId]?.window;
+      if (real) return Reflect.get(real, prop);
+      // Pre-realm (shim document) access.
+      return el._iframeWin ? Reflect.get(el._iframeWin, prop) : undefined;
+    },
+    has(_target, prop) {
+      if (prop === 'postMessage' || prop === '__obscura_wrapsRealm') return true;
+      const real = globalThis.__obscura_frameObjects?.[el._frameId]?.window;
+      if (real) return Reflect.has(real, prop);
+      return false;
+    },
+  });
+  try {
+    Object.defineProperty(el, '__obscura_stableWin', { value: win, configurable: true });
+  } catch (_) { el.__obscura_stableWin = win; }
+  return win;
+}
+
 // The host calls this inside the target realm.
 globalThis.__obscura_deliverMessage = function(dataJson, origin, sourceFrameId) {
   let data = null;
   try { data = JSON.parse(dataJson).v; } catch (_) {}
   // Who to reply to: the frame above, or one of the frames below.
+  // `source` must be the SAME object the page reads as iframe.contentWindow —
+  // widgets compare them referentially (CF Turnstile drops otherwise).
   const source = (globalThis.__obscura_frameId !== 0
                   && sourceFrameId === globalThis.__obscura_parentFrameId)
     ? globalThis.parent
-    : _frameWindowFor(sourceFrameId);
+    : (globalThis.__obscura_frameElements[sourceFrameId]
+       ? _stableWindowForElement(globalThis.__obscura_frameElements[sourceFrameId])
+       : _frameWindowFor(sourceFrameId));
   try {
     // Trusted, because the user agent delivers this event: the sender called
     // postMessage, it did not dispatch this. Real embedders check the flag and
