@@ -243,6 +243,29 @@ pub async fn handle(
                         });
                     }
                 }
+            } else if event_type == "mouseMoved" {
+                // Humanized trajectories (Go client) stream these ahead of a
+                // click. Hover matters to detection scripts: dispatch a real
+                // mousemove/pointermove pair at the element under the cursor,
+                // mirroring the mousePressed elementFromPoint resolution.
+                if let Some(page) = ctx.get_session_page_mut(session_id) {
+                    let code = format!(
+                        "(function() {{\
+                            var target = (document.elementFromPoint && document.elementFromPoint({x},{y})) || document.body;\
+                            if (!target) return;\
+                            globalThis.__obscura_click_target = target;\
+                            var mv = globalThis.__obscura_markTrusted(new MouseEvent('mousemove', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:0,buttons:0,detail:0}}));\
+                            target.dispatchEvent(mv);\
+                            if (typeof PointerEvent === 'function') {{\
+                                var pv = globalThis.__obscura_markTrusted(new PointerEvent('pointermove', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0}}));\
+                                target.dispatchEvent(pv);\
+                            }}\
+                        }})()",
+                        x = x,
+                        y = y,
+                    );
+                    page.evaluate(&code);
+                }
             } else if event_type == "mouseWheel" {
                 let delta_x = params.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let delta_y = params.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0);
