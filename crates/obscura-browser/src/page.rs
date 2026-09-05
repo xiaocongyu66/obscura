@@ -17,34 +17,18 @@ use crate::lifecycle::LifecycleState;
 /// Returns None when unset or malformed, leaving the built-in default in place.
 /// Lets a deployment align the reported coordinates with the region its exit IP
 /// resolves to, so timezone and location stay consistent (issue #228).
-/// Derives navigator.language(s) from the pinned TZ region (OBSCURA_TIMEZONE
-/// / TZ), so a browser exiting through an Asia/Shanghai proxy reports zh-CN
-/// instead of the engine default en-US — matching the exit IP geography.
+/// navigator.language(s): OBSCURA_LOCALE (host-mapped from the exit IP's
+/// countryCode) wins; anything else keeps the engine default en-US. Deriving
+/// from the TZ name is unsound — an IANA zone's segments are region/city,
+/// and a city name is not a language code.
 fn env_locale() -> Option<(String, Vec<String>)> {
-    // Host-mapped locale (countryCode → BCP47 at launch) wins; the TZ-name
-    // heuristic below is only a fallback because an IANA zone's segments are
-    // region/city, and a city name is not a language code.
-    if let Ok(locale) = std::env::var("OBSCURA_LOCALE") {
-        let locale = locale.trim();
-        if !locale.is_empty() && locale.matches('-').count() == 1 {
-            let lang = locale.split('-').next().unwrap_or("en").to_ascii_lowercase();
-            return Some((locale.to_string(), vec![locale.to_string(), lang]));
-        }
+    let locale = std::env::var("OBSCURA_LOCALE").ok()?;
+    let locale = locale.trim();
+    if locale.is_empty() || locale.matches('-').count() != 1 {
+        return None;
     }
-    let tz = std::env::var("OBSCURA_TIMEZONE")
-        .or_else(|_| std::env::var("TZ"))
-        .ok()?;
-    let region = tz.split('/').nth(1)?.replace('_', "-");
-    // Primary tag from the region, plus a broad fallback language.
-    let primary = match region.split_once('-') {
-        Some((lang, _)) => lang.to_ascii_lowercase(),
-        None => region.to_ascii_lowercase(),
-    };
-    let primary_full = format!("{}-{}", primary, region.split('-').next_back().unwrap_or(&region));
-    Some((
-        primary_full.clone(),
-        vec![primary_full, primary],
-    ))
+    let lang = locale.split('-').next().unwrap_or("en").to_ascii_lowercase();
+    Some((locale.to_string(), vec![locale.to_string(), lang]))
 }
 
 fn env_geolocation() -> Option<(f64, f64)> {
