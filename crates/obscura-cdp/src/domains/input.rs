@@ -319,6 +319,49 @@ pub async fn handle(
 
             Ok(json!({}))
         }
+        "humanGesture" => {
+            // Whole-trajectory hover: the client sends every point at once and
+            // the page replays them on a setTimeout chain. Runtime.evaluate
+            // would stall this behind its post-eval frame pump (1.5s+), so the
+            // gesture runs through a direct page.evaluate with no pumping.
+            let pts = params
+                .get("points")
+                .and_then(|v| v.as_array())
+                .ok_or("points required")?;
+            let mut coords = String::new();
+            for p in pts {
+                let x = p.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = p.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let d = p.get(2).and_then(|v| v.as_u64()).unwrap_or(10);
+                coords.push_str(&format!("[{},{},{}],", x, y, d));
+            }
+            if let Some(page) = ctx.get_session_page_mut(session_id) {
+                let code = format!(
+                    "(function() {{\
+                        var pts = [{coords}];\
+                        var i = 0;\
+                        function step() {{\
+                            if (i >= pts.length) return;\
+                            var p = pts[i++];\
+                            var target = (document.elementFromPoint && document.elementFromPoint(p[0], p[1])) || document.body;\
+                            if (target) {{\
+                                globalThis.__obscura_click_target = target;\
+                                try {{\
+                                    target.dispatchEvent(globalThis.__obscura_markTrusted(new MouseEvent('mousemove', {{bubbles:true,cancelable:true,view:globalThis,clientX:p[0],clientY:p[1],button:0,buttons:0,detail:0}})));\
+                                    if (typeof PointerEvent === 'function') {{\
+                                        target.dispatchEvent(globalThis.__obscura_markTrusted(new PointerEvent('pointermove', {{bubbles:true,cancelable:true,view:globalThis,clientX:p[0],clientY:p[1],pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0}})));\
+                                    }}\
+                                }} catch (e) {{}}\
+                            }}\
+                            setTimeout(step, p[2]);\
+                        }}\
+                        step();\
+                    }})()"
+                );
+                page.evaluate(&code);
+            }
+            Ok(json!({}))
+        }
         "dispatchKeyEvent" => {
             let event_type = params.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("");
