@@ -216,10 +216,20 @@ pub async fn handle(
                         shift_key = shift_key,
                     );
                     page.evaluate(&code);
-                    let moved = page
-                        .process_pending_navigation()
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    // A click that submits a form/location can wait out a full
+                    // page Load (30s on challenge pages that never settle).
+                    // The client already sees the dispatched DOM events, so
+                    // cap the follow-through: 3s for the navigation itself,
+                    // and never fail the click because it timed out.
+                    let moved = match tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        page.process_pending_navigation(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(moved)) => moved,
+                        Ok(Err(_)) | Err(_) => false,
+                    };
                     // Fork: a single page app answers a click by routing itself,
                     // with no document fetch. The client still has to be told the
                     // frame moved, or the click looks like it did nothing.
