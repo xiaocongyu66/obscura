@@ -441,6 +441,20 @@ pub async fn handle(
                     seq_base = seq_base,
                 );
                 page.evaluate(&code);
+                // The press sequence runs on a setTimeout chain — someone has
+                // to drive the event loop for it to fire, and the client
+                // already treats this call as asynchronous. Pump until the
+                // gesture completes (bounded), so the click actually lands
+                // instead of starving until the next unrelated command.
+                let pump_budget = std::time::Duration::from_millis(press_delay + 700);
+                if let Ok(budget) = std::time::Duration::try_from(pump_budget) {
+                    let _ = tokio::time::timeout(budget, async {
+                        if let Some(page) = ctx.get_session_page_mut(session_id) {
+                            page.settle(press_delay + 650).await;
+                        }
+                    })
+                    .await;
+                }
             }
             Ok(json!({}))
         }
