@@ -18,6 +18,8 @@ jobs:
           sudo apt-get install -y -qq llvm clang mold cmake ninja-build yasm autoconf2.13 libclang-dev pkg-config python3-pip libfreetype-dev libfontconfig1-dev libharfbuzz-dev libssl-dev libasound2-dev libudev-dev libx11-dev libgbm-dev libegl1-mesa-dev
       - name: cargo check servo-script (vendored workspace)
         run: cargo check -p servo-script --no-default-features 2>&1 | tail -30
+      - name: cargo check obscura-embedder
+        run: cargo check -p obscura-embedder 2>&1 | tail -30
 
   probe:
     runs-on: ubuntu-24.04-arm

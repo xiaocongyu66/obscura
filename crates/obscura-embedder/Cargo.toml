@@ -1,0 +1,18 @@
+[package]
+name = "obscura-embedder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+servo = { path = "../../servo/components/servo", default-features = false }
+# 裁掉 Servo embedder 的重可选依赖(webgl/webxr/gamepad 走 default feature 关闭)
+url.workspace = true
+log.workspace = true
+image = { workspace = true, optional = true }
+
+[features]
+default = []
+# 截图输出(image encode PNG)
+screenshot = ["dep:image"]
