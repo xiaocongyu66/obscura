@@ -770,6 +770,7 @@ pub(crate) fn command_can_change_screencast_frame(method: &str) -> bool {
             | "Runtime.callFunctionOn"
             | "Input.dispatchMouseEvent"
             | "Input.humanGesture"
+            | "Input.humanType"
             | "Input.dispatchKeyEvent"
             | "Input.dispatchTouchEvent"
             | "Emulation.setDeviceMetricsOverride"

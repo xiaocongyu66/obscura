@@ -266,7 +266,7 @@ pub async fn handle(
                             if (!target) return;\
                             globalThis.__obscura_click_target = target;\
                             try {{ globalThis.__obscura_engineInput({{kind:'pointermove', seq:{seq}, ts:performance.now(), prev:[]}}); }} catch(e) {{}}\
-                            var mv = globalThis.__obscura_markTrusted(new MouseEvent('mousemove', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:0,buttons:0,detail:0}}));\
+                            var mv = globalThis.__obscura_markTrusted(new MouseEvent('mousemove', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:0,buttons:0,detail:0,sourceCapabilities:new InputDeviceCapabilities({{firesTouchEvents:false}})}}));\
                             try {{ Object.defineProperty(mv, '_engineSeq', {{value:{seq}}}); }} catch(e) {{}}\
                             target.dispatchEvent(mv);\
                             if (typeof PointerEvent === 'function') {{\
@@ -381,7 +381,7 @@ pub async fn handle(
                             seq++;\
                             try {{ globalThis.__obscura_engineInput({{kind:'pointerdown', seq:seq, ts:performance.now(), prev:[]}}); }} catch(e) {{}}\
                             var pd = globalThis.__obscura_markTrusted(new PointerEvent('pointerdown', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0.5,buttons:1}}));\
-                            var md = globalThis.__obscura_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:1,detail:1}}));\
+                            var md = globalThis.__obscura_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:1,detail:1,sourceCapabilities:new InputDeviceCapabilities({{firesTouchEvents:false}})}}));\
                             try {{ Object.defineProperty(pd, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
                             try {{ Object.defineProperty(md, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
                             target.dispatchEvent(pd);\
@@ -390,8 +390,8 @@ pub async fn handle(
                                 seq++;\
                                 try {{ globalThis.__obscura_engineInput({{kind:'pointerup', seq:seq, ts:performance.now(), prev:[]}}); }} catch(e) {{}}\
                                 var pu = globalThis.__obscura_markTrusted(new PointerEvent('pointerup', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0,buttons:0}}));\
-                                var mu = globalThis.__obscura_markTrusted(new MouseEvent('mouseup', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:0,detail:1}}));\
-                                var ck = globalThis.__obscura_markTrusted(new MouseEvent('click', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:0,detail:1}}));\
+                                var mu = globalThis.__obscura_markTrusted(new MouseEvent('mouseup', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:0,detail:1,sourceCapabilities:new InputDeviceCapabilities({{firesTouchEvents:false}})}}));\
+                                var ck = globalThis.__obscura_markTrusted(new MouseEvent('click', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:0,detail:1,sourceCapabilities:new InputDeviceCapabilities({{firesTouchEvents:false}})}}));\
                                 try {{ Object.defineProperty(pu, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
                                 try {{ Object.defineProperty(mu, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
                                 try {{ Object.defineProperty(ck, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
@@ -424,7 +424,7 @@ pub async fn handle(
                                 try {{ globalThis.__obscura_engineInput({{kind:'pointermove', seq:seq, ts:performance.now(), prev:prevPts}}); }} catch(e) {{}}\
                                 var pm = globalThis.__obscura_markTrusted(new PointerEvent('pointermove', {{bubbles:true,cancelable:true,view:globalThis,clientX:p[0],clientY:p[1],pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0}}));\
                                 try {{ Object.defineProperty(pm, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
-                                var mm = globalThis.__obscura_markTrusted(new MouseEvent('mousemove', {{bubbles:true,cancelable:true,view:globalThis,clientX:p[0],clientY:p[1],button:0,buttons:0,detail:0}}));\
+                                var mm = globalThis.__obscura_markTrusted(new MouseEvent('mousemove', {{bubbles:true,cancelable:true,view:globalThis,clientX:p[0],clientY:p[1],button:0,buttons:0,detail:0,sourceCapabilities:new InputDeviceCapabilities({{firesTouchEvents:false}})}}));\
                                 try {{ Object.defineProperty(mm, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
                                 try {{\
                                     target.dispatchEvent(pm);\
