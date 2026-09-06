@@ -26,9 +26,14 @@ pub use border::{
 };
 
 pub mod dom;
+mod dom_counters;
+mod dom_sticky;
+mod dom_invalidation;
+mod dom_tables;
+pub use dom_sticky::StickyLayout;
 pub use dom::{
     layout_dom, layout_dom_with_images, layout_dom_with_resources, AttributeStyleMutation,
-    DomLayout, RetainedStyleMutation, StickyLayout, TreeStyleMutation,
+    DomLayout, RetainedStyleMutation, TreeStyleMutation,
 };
 
 /// Whether an image MIME type names a format supported by the renderer build.
