@@ -30,10 +30,12 @@ mod dom_counters;
 mod dom_sticky;
 mod dom_invalidation;
 mod dom_tables;
+mod dom_entry;
 mod dom_grid;
 pub use dom_sticky::StickyLayout;
+pub use dom_entry::{layout_dom, layout_dom_with_images, layout_dom_with_resources};
 pub use dom::{
-    layout_dom, layout_dom_with_images, layout_dom_with_resources, AttributeStyleMutation,
+    AttributeStyleMutation,
     DomLayout, RetainedStyleMutation, TreeStyleMutation,
 };
 
