@@ -378,7 +378,7 @@ script = { package = "servo-script", path = "servo/components/script" }
 script_bindings = { package = "servo-script-bindings", path = "servo/components/script_bindings" }
 script_webgpu = { package = "servo-script-webgpu", path = "servo/components/script_webgpu" }
 script_traits = { package = "servo-script-traits", path = "servo/components/shared/script" }
-servo = { version = "=0.5.0", path = "servo/components/servo", default-features = false }
+servo = { path = "servo/components/servo", default-features = false }
 servo-allocator = { path = "servo/components/allocator" }
 servo-background-hang-monitor = { path = "servo/components/background_hang_monitor" }
 servo-background-hang-monitor-api = { path = "servo/components/shared/background_hang_monitor" }
@@ -415,7 +415,7 @@ storage = { package = "servo-storage", path = "servo/components/storage" }
 storage_traits = { package = "servo-storage-traits", path = "servo/components/shared/storage" }
 timers = { package = "servo-timers", path = "servo/components/timers" }
 webdriver_server = { package = "servo-webdriver-server", path = "servo/components/webdriver_server" }
-webgl = { package = "servo-webgl", version = "=0.5.0", path = "servo/components/webgl", default-features = false }
+webgl = { package = "servo-webgl", path = "servo/components/webgl", default-features = false }
 webgpu = { package = "servo-webgpu", path = "servo/components/webgpu" }
 webgpu_traits = { package = "servo-webgpu-traits", path = "servo/components/shared/webgpu" }
 webxr = { package = "servo-webxr", path = "servo/components/webxr" }
