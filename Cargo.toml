@@ -76,9 +76,9 @@ obscura-webgl = { path = "crates/obscura-webgl" }
 html5ever = "0.39"
 markup5ever = "0.39"
 xml5ever = "0.39"
-selectors = "0.26"
-servo_arc = "0.4"
-cssparser = "0.34"
+selectors = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f30125e27a8fb897a709c5e" }
+servo_arc = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f30125e27a8fb897a709c5e" }
+cssparser = { version = "0.37", features = ["serde"] }
 # Layout engine for the optional render layer (obscura-render). Pure Rust.
 taffy = "0.12"
 # CPU-only pure-Rust 2D rasterizer for the render layer's paint step.

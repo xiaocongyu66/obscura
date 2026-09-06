@@ -1795,17 +1795,6 @@ dependencies = [
 
 [[package]]
 name = "derive_more"
-version = "0.99.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6edb4b64a43d977b8e99788fe3a04d483834fba1215a7e02caa415b626497f7f"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "derive_more"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134"
@@ -2561,15 +2550,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "fxhash"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
-dependencies = [
- "byteorder",
 ]
 
 [[package]]
@@ -5142,12 +5122,12 @@ dependencies = [
 name = "obscura-dom"
 version = "0.1.0"
 dependencies = [
- "cssparser 0.34.0",
+ "cssparser 0.37.0",
  "html5ever",
  "markup5ever",
  "precomputed-hash",
- "selectors 0.26.0",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "selectors",
+ "servo_arc",
  "thiserror 2.0.18",
  "tracing",
  "xmloxide",
@@ -5583,16 +5563,6 @@ dependencies = [
  "phf_macros 0.13.1",
  "phf_shared 0.13.1",
  "serde",
-]
-
-[[package]]
-name = "phf_codegen"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aef8048c789fa5e851558d709946d6d79a8ff88c0440c587967f8e94bfb1216a"
-dependencies = [
- "phf_generator 0.11.3",
- "phf_shared 0.11.3",
 ]
 
 [[package]]
@@ -6857,38 +6827,19 @@ dependencies = [
 
 [[package]]
 name = "selectors"
-version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd568a4c9bb598e291a08244a5c1f5a8a6650bee243b5b0f8dbb3d9cc1d87fe8"
-dependencies = [
- "bitflags 2.13.0",
- "cssparser 0.34.0",
- "derive_more 0.99.20",
- "fxhash",
- "log",
- "new_debug_unreachable",
- "phf 0.11.3",
- "phf_codegen 0.11.3",
- "precomputed-hash",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "smallvec",
-]
-
-[[package]]
-name = "selectors"
 version = "0.40.0"
 source = "git+https://github.com/servo/stylo?rev=b3e6425100df710c7f30125e27a8fb897a709c5e#b3e6425100df710c7f30125e27a8fb897a709c5e"
 dependencies = [
  "bitflags 2.13.0",
  "cssparser 0.37.0",
- "derive_more 2.1.1",
+ "derive_more",
  "log",
  "new_debug_unreachable",
  "phf 0.13.1",
- "phf_codegen 0.13.1",
+ "phf_codegen",
  "precomputed-hash",
  "rustc-hash 2.1.2",
- "servo_arc 0.4.3 (git+https://github.com/servo/stylo?rev=b3e6425100df710c7f30125e27a8fb897a709c5e)",
+ "servo_arc",
  "smallvec",
  "to_shmem",
  "to_shmem_derive",
@@ -7390,7 +7341,7 @@ dependencies = [
  "servo-profile-traits",
  "servo-tracing",
  "servo-url",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "servo_arc",
  "skrifa 0.44.0",
  "smallvec",
  "stylo",
@@ -7424,7 +7375,7 @@ dependencies = [
  "servo-malloc-size-of",
  "servo-profile-traits",
  "servo-url",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "servo_arc",
  "stylo",
  "uuid",
  "webrender_api",
@@ -7481,7 +7432,7 @@ dependencies = [
  "malloc_size_of_derive",
  "parking_lot",
  "rustc-hash 2.1.2",
- "selectors 0.26.0",
+ "selectors",
  "serde",
  "servo-background-hang-monitor-api",
  "servo-base",
@@ -7494,7 +7445,7 @@ dependencies = [
  "servo-profile-traits",
  "servo-script-traits",
  "servo-url",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "servo_arc",
  "stylo",
  "stylo_traits",
  "uuid",
@@ -7525,7 +7476,7 @@ dependencies = [
  "parking_lot",
  "resvg 0.48.1",
  "servo-allocator",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "servo_arc",
  "smallvec",
  "string_cache",
  "stylo",
@@ -7724,7 +7675,7 @@ dependencies = [
  "servo-profile-traits",
  "servo-tracing",
  "servo-url",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "servo_arc",
  "smallvec",
  "tempfile",
  "time",
@@ -7776,7 +7727,7 @@ dependencies = [
  "servo-pixels",
  "servo-profile-traits",
  "servo-url",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "servo_arc",
  "sys-locale",
  "tokio",
  "url",
@@ -7934,7 +7885,7 @@ dependencies = [
  "crossbeam-channel",
  "crypto-bigint",
  "cshake",
- "cssparser 0.34.0",
+ "cssparser 0.37.0",
  "ctr 0.10.1",
  "ctutils",
  "data-url",
@@ -7985,7 +7936,7 @@ dependencies = [
  "resvg 0.48.1",
  "rsa",
  "rustc-hash 2.1.2",
- "selectors 0.26.0",
+ "selectors",
  "serde",
  "serde_json",
  "servo-background-hang-monitor-api",
@@ -8023,7 +7974,7 @@ dependencies = [
  "servo-webvtt",
  "servo-webxr-api",
  "servo-xpath",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "servo_arc",
  "sha1 0.11.0",
  "sha2 0.11.0",
  "sha3 0.12.0",
@@ -8075,7 +8026,7 @@ dependencies = [
  "num-traits",
  "parking_lot",
  "phf 0.13.1",
- "phf_codegen 0.13.1",
+ "phf_codegen",
  "phf_shared 0.13.1",
  "regex",
  "serde_json",
@@ -8089,7 +8040,7 @@ dependencies = [
  "servo-profile-traits",
  "servo-url",
  "servo-webxr-api",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "servo_arc",
  "smallvec",
  "strum 0.28.0",
  "stylo",
@@ -8224,7 +8175,7 @@ dependencies = [
  "malloc_size_of_derive",
  "serde",
  "servo-malloc-size-of",
- "servo_arc 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "servo_arc",
  "url",
  "uuid",
 ]
@@ -8382,15 +8333,6 @@ dependencies = [
 [[package]]
 name = "servo_arc"
 version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930"
-dependencies = [
- "stable_deref_trait",
-]
-
-[[package]]
-name = "servo_arc"
-version = "0.4.3"
 source = "git+https://github.com/servo/stylo?rev=b3e6425100df710c7f30125e27a8fb897a709c5e#b3e6425100df710c7f30125e27a8fb897a709c5e"
 dependencies = [
  "serde",
@@ -8418,6 +8360,12 @@ dependencies = [
  "cpufeatures 0.3.1",
  "digest 0.11.3",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
@@ -8813,7 +8761,7 @@ dependencies = [
  "bitflags 2.13.0",
  "byteorder",
  "cssparser 0.37.0",
- "derive_more 2.1.1",
+ "derive_more",
  "encoding_rs",
  "euclid",
  "icu_segmenter 2.1.2",
@@ -8833,9 +8781,9 @@ dependencies = [
  "rayon",
  "rayon-core",
  "rustc-hash 2.1.2",
- "selectors 0.40.0",
+ "selectors",
  "serde",
- "servo_arc 0.4.3 (git+https://github.com/servo/stylo?rev=b3e6425100df710c7f30125e27a8fb897a709c5e)",
+ "servo_arc",
  "smallbitvec",
  "smallvec",
  "static_assertions",
@@ -8896,8 +8844,8 @@ dependencies = [
  "app_units",
  "cssparser 0.37.0",
  "euclid",
- "selectors 0.40.0",
- "servo_arc 0.4.3 (git+https://github.com/servo/stylo?rev=b3e6425100df710c7f30125e27a8fb897a709c5e)",
+ "selectors",
+ "servo_arc",
  "smallbitvec",
  "smallvec",
  "string_cache",
@@ -8923,9 +8871,9 @@ dependencies = [
  "cssparser 0.37.0",
  "euclid",
  "malloc_size_of_derive",
- "selectors 0.40.0",
+ "selectors",
  "serde",
- "servo_arc 0.4.3 (git+https://github.com/servo/stylo?rev=b3e6425100df710c7f30125e27a8fb897a709c5e)",
+ "servo_arc",
  "stylo_atoms",
  "stylo_malloc_size_of",
  "thin-vec",
@@ -9332,7 +9280,7 @@ version = "0.5.0"
 source = "git+https://github.com/servo/stylo?rev=b3e6425100df710c7f30125e27a8fb897a709c5e#b3e6425100df710c7f30125e27a8fb897a709c5e"
 dependencies = [
  "cssparser 0.37.0",
- "servo_arc 0.4.3 (git+https://github.com/servo/stylo?rev=b3e6425100df710c7f30125e27a8fb897a709c5e)",
+ "servo_arc",
  "smallbitvec",
  "smallvec",
  "string_cache",
@@ -10024,6 +9972,7 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 
@@ -10372,7 +10321,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba8b815c1b593dc0baf78dd0f4fc8fdb2de53198fb1163738093e9a311c33fb3"
 dependencies = [
  "phf 0.13.1",
- "phf_codegen 0.13.1",
+ "phf_codegen",
  "string_cache",
  "string_cache_codegen",
 ]
@@ -10435,7 +10384,7 @@ dependencies = [
  "bitflags 2.13.0",
  "build-parallel",
  "byteorder",
- "derive_more 2.1.1",
+ "derive_more",
  "etagere",
  "euclid",
  "gleam",

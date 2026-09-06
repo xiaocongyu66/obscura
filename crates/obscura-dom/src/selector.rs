@@ -1382,8 +1382,8 @@ impl CompiledSelector {
     /// matching against the host in their own tree scope.
     pub fn matches_featureless_host(&self) -> bool {
         self.sel
-            .matches_featureless_host_selector_or_pseudo_element()
-            .contains(parser::FeaturelessHostMatches::FOR_HOST)
+            .matches_featureless_host(true)
+            .may_match()
     }
 
     /// Whether this selector contains the `::slotted()` pseudo-element and
