@@ -36,7 +36,7 @@ itertools = { workspace = true }
 kurbo = { workspace = true }
 layout_api = { workspace = true }
 log = { workspace = true }
-malloc_size_of = { workspace = true, features = ["servo-taffy"] }
+malloc_size_of = { workspace = true }
 malloc_size_of_derive = { workspace = true }
 net_traits = { workspace = true }
 num-derive = { workspace = true }

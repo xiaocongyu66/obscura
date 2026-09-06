@@ -14,7 +14,7 @@ default = []
 paint = ["dep:tiny-skia", "dep:ab_glyph", "dep:cosmic-text", "dep:swash", "dep:image", "dep:ureq", "dep:base64", "dep:resvg", "dep:usvg", "dep:url", "dep:wuff"]
 
 [dependencies]
-taffy = { workspace = true }
+taffy = { path = "../../vendor/taffy" }
 obscura-dom = { workspace = true }
 tiny-skia = { workspace = true, optional = true }
 ab_glyph = { workspace = true, optional = true }

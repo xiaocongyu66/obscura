@@ -81,7 +81,7 @@ selectors = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f3
 servo_arc = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f30125e27a8fb897a709c5e" }
 cssparser = { version = "0.37", features = ["serde"] }
 # Layout engine for the optional render layer (obscura-render). Pure Rust.
-taffy = "0.12"
+taffy = { version = "0.14.0", default-features = false, features = ["calc", "detailed_layout_info", "grid", "std"] }
 # CPU-only pure-Rust 2D rasterizer for the render layer's paint step.
 tiny-skia = "0.12"
 # Pure-Rust glyph rasterizer for the render layer's text step.
@@ -424,8 +424,6 @@ webxr-api = { package = "servo-webxr-api", path = "servo/components/shared/webxr
 xpath = { package = "servo-xpath", path = "servo/components/xpath" }
 
 [patch.crates-io]
-# Keep the grid shrink-to-fit correction local until it lands upstream.
-taffy = { path = "vendor/taffy" }
 # Local fix: btls-sys prefix_symbols applies objcopy per archive member
 # (archive-wide objcopy --redefine-syms is a silent no-op on CI).
 btls-sys = { path = "crates/btls-sys-patch" }

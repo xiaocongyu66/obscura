@@ -1249,13 +1249,9 @@ malloc_size_of_is_0!(unicode_bidi::Level);
 malloc_size_of_is_0!(unicode_script::Script);
 malloc_size_of_is_0!(std::net::TcpStream);
 
-#[cfg(feature = "servo-taffy")]
 malloc_size_of_is_0!(taffy::Layout);
-#[cfg(feature = "servo-taffy")]
 malloc_size_of_is_0!(taffy::Baselines);
-#[cfg(feature = "servo-taffy")]
 malloc_size_of_is_0!(taffy::DetailedGridItemsInfo);
-#[cfg(feature = "servo-taffy")]
 impl<T> MallocSizeOf for taffy::Line<T>
 where
     T: MallocSizeOf,
@@ -1264,7 +1260,6 @@ where
         self.start.size_of(ops) + self.end.size_of(ops)
     }
 }
-#[cfg(feature = "servo-taffy")]
 impl<T> MallocSizeOf for taffy::DetailedGridInfo<T>
 where
     T: MallocSizeOf + taffy::CheapCloneStr,
