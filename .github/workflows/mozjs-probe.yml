@@ -1,0 +1,44 @@
+name: mozjs-compile-probe
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [local-mods]
+    paths: ['.github/workflows/mozjs-probe.yml']
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Install SpiderMonkey build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq llvm clang cmake ninja-build yasm autoconf2.13 libclang-dev pkg-config python3-pip
+          clang --version | head -1
+
+      - name: mozjs standalone compile probe
+        run: |
+          cargo new --bin probe 2>/dev/null || true
+          cd probe
+          cat > Cargo.toml <<'TOML'
+          [package]
+          name = "probe"
+          version = "0.1.0"
+          edition = "2021"
+          [dependencies]
+          mozjs = { version = "=0.24.0", default-features = false, features = ["intl", "libz-sys"] }
+          TOML
+          echo 'fn main() { println!("mozjs link ok"); }' > src/main.rs
+          cargo build --release 2>&1 | tail -25
+          ./target/release/probe
+
+      - name: servo script crate check probe
+        run: |
+          git clone --depth 1 --branch main https://github.com/servo/servo.git servo-src 2>&1 | tail -1 || true
+          # 若 sparse 已有本地拷贝更好——CI 里直接完整 clone
+          cd servo-src
+          rustc --version
+          # 只验证 script 组依赖图能否解析 + mozjs-sys 能否在 CI 产出
+          cargo check -p script --no-default-features --features "webgpu=off webxr=off" 2>&1 | tail -20 || \
+            cargo check -p script 2>&1 | tail -20
