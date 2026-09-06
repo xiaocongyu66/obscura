@@ -12,6 +12,9 @@ description.workspace = true
 [lib]
 path = "lib.rs"
 
+[features]
+servo-taffy = ["dep:taffy"]
+
 [dependencies]
 app_units = { workspace = true }
 atomic_refcell = { workspace = true }
@@ -39,7 +42,7 @@ string_cache = { workspace = true }
 stylo = { workspace = true }
 stylo_dom = { workspace = true }
 stylo_malloc_size_of = { workspace = true }
-taffy = { workspace = true }
+taffy = { workspace = true, optional = true }
 tendril = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
