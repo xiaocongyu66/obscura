@@ -493,7 +493,7 @@ fn validate_context_id(
 fn remote_object_from_info(info: &RemoteObjectInfo) -> Value {
     let mut obj = json!({ "type": info.js_type });
 
-    if let Some(ref subtype) = info.subtype {
+    if let Some(subtype) = info.subtype {
         obj["subtype"] = json!(subtype);
     }
 
@@ -505,11 +505,11 @@ fn remote_object_from_info(info: &RemoteObjectInfo) -> Value {
         obj["description"] = json!(info.description);
     }
 
-    if let Some(ref oid) = info.object_id {
+    if let Some(oid) = info.object_id {
         obj["objectId"] = json!(oid);
     }
 
-    if let Some(ref value) = info.value {
+    if let Some(value) = info.value {
         obj["value"] = value.clone();
     }
 

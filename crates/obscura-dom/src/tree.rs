@@ -596,8 +596,8 @@ impl DomTree {
         let mut inner = self.inner.borrow_mut();
         let id = if let Some(slot) = inner.free_list.pop() {
             // 复用:该 slot 的代数 ++(前一个节点的 wrapper 立即失效)
-            let gen = inner.slot_generations.entry(slot).or_insert(0);
-            *gen = gen.wrapping_add(1);
+            let generation = inner.slot_generations.entry(slot).or_insert(0);
+            *generation = generation.wrapping_add(1);
             NodeId(slot)
         } else {
             // 新 slot:代数从 1 起(0 保留给"无节点"哨兵语义,让首版

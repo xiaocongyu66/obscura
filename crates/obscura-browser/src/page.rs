@@ -1514,7 +1514,7 @@ impl Page {
 
     async fn do_fetch(&self, url: &Url) -> Result<Response, ObscuraNetError> {
         #[cfg(feature = "stealth")]
-        if let Some(ref stealth) = self.stealth_client {
+        if let Some(stealth) = self.stealth_client {
             return stealth.fetch(url).await;
         }
         self.http_client
@@ -1603,7 +1603,7 @@ impl Page {
         rt.set_callbacks(self.callbacks.clone());
         rt.set_blocked_urls(self.blocked_url_patterns.clone());
         #[cfg(feature = "stealth")]
-        if let Some(ref stealth) = self.stealth_client {
+        if let Some(stealth) = self.stealth_client {
             rt.set_stealth_client(stealth.clone());
         }
 

@@ -1127,7 +1127,7 @@ async fn tool_navigate(args: &Value, state: &mut BrowserState) -> Result<String,
     let condition = obscura_browser::lifecycle::WaitUntil::from_str(wait_until);
     let ua = state.user_agent.clone();
     let page = state.page_mut();
-    if let Some(ref ua) = ua {
+    if let Some(ua) = ua {
         page.http_client.set_user_agent(ua).await;
     }
 
@@ -1955,7 +1955,7 @@ async fn tool_tab_new(args: &Value, state: &mut BrowserState) -> Result<String, 
     if let Some(u) = url {
         let ua = state.user_agent.clone();
         let page = state.page_mut();
-        if let Some(ref ua) = ua {
+        if let Some(ua) = ua {
             page.http_client.set_user_agent(ua).await;
         }
         page.navigate_with_wait(u, obscura_browser::lifecycle::WaitUntil::DomContentLoaded)
@@ -2003,7 +2003,7 @@ fn tool_tab_close(args: &Value, state: &mut BrowserState) -> Result<String, Stri
         state.active_tab = state.tabs.keys().next().cloned();
         state.interactive_refs.clear();
     }
-    let summary = if let Some(ref a) = state.active_tab {
+    let summary = if let Some(a) = state.active_tab {
         format!("Closed {tab_id}. Active tab now {a}.")
     } else {
         format!("Closed {tab_id}. No tabs remain.")

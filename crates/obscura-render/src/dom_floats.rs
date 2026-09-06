@@ -33,7 +33,9 @@ use crate::dom_sticky::{DerivedGeometryState, DerivedLayoutState, StickyFrame, S
 use crate::{to_taffy_style, Rect};
 
 use super::*;
-use crate::dom::{FloatContinuation, build, build_any, build_mixed_block, build_in_flow_pseudo, has_in_flow_generated_pseudo, effective_container_type, style_children, blockify_layout_children, blockify_generated_pseudos, tokenize_with_spaces, build_text_words, build_shaped_word_leaves, build_word_leaves, build_pseudo_content, pseudo_requires_generated_box, folded_inline_relative_offset, synthesize_ordinary_inline_fragments, synthesize_shaped_inline_fragments, shaped_item_clip, has_inline_content, GeneratedBoxKind, IfcRegistry, rendered_children, rendered_parent};
+use crate::dom::{FloatContinuation, build, build_any, build_mixed_block, build_in_flow_pseudo, has_in_flow_generated_pseudo, effective_container_type, style_children, blockify_layout_children, blockify_generated_pseudos, tokenize_with_spaces, build_text_words, build_shaped_word_leaves, build_word_leaves, build_pseudo_content, pseudo_requires_generated_box, has_inline_content, GeneratedBoxKind, IfcRegistry, rendered_children, rendered_parent};
+#[cfg(feature = "paint")]
+use crate::dom::{folded_inline_relative_offset, synthesize_ordinary_inline_fragments, synthesize_shaped_inline_fragments, shaped_item_clip};
 
 /// Approximate `float: left|right` without real per-line reflow (which
 /// taffy's block/flex/grid modes do not provide): place the float alongside

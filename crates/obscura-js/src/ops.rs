@@ -1446,8 +1446,8 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
         // 必须失效(Next.js 水合曾收到跨 slot 的僵尸 select wrapper)。
         "node_generation" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
-            let gen = dom.with_node(NodeId::new(nid), |n| n.generation);
-            serde_json::to_string(&gen.unwrap_or(u32::MAX)).unwrap_or("\"0\"".into())
+            let generation = dom.with_node(NodeId::new(nid), |n| n.generation);
+            serde_json::to_string(&generation.unwrap_or(u32::MAX)).unwrap_or("\"0\"".into())
         }
         "node_type" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
@@ -1471,7 +1471,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                         // DOM spec:nodeName = qualified name(prefix:local),
                         // HTML ns 元素 ASCII 大写,其它 ns 原样。
                         match name.prefix {
-                            Some(ref p) => {
+                            Some(p) => {
                                 let mut qn = p.as_ref().to_string();
                                 qn.push(':');
                                 let is_html = name.ns.as_ref() == "http://www.w3.org/1999/xhtml";
@@ -2502,7 +2502,7 @@ async fn op_fetch_url(
     // reaches the network (Fulfill/Fail from the interception channel short-
     // circuit earlier). on_request/on_response previously fired only for
     // navigation; this wires them for JS fetch()/XHR too.
-    if let Some(ref cbs) = callbacks {
+    if let Some(cbs) = callbacks {
         if cbs.has_request_callbacks().await {
             if let Ok(parsed) = url::Url::parse(&url) {
                 let info = RequestInfo {
@@ -2618,7 +2618,7 @@ async fn op_fetch_url(
 
         let credentials_allowed = credentials.allows(&page_origin, &current_url);
         if credentials_allowed {
-            if let Some(ref jar) = cookie_jar {
+            if let Some(jar) = cookie_jar {
                 if let Ok(parsed_url) = url::Url::parse(&current_url) {
                     let cookie_header = jar.get_cookie_header(&parsed_url);
                     if !cookie_header.is_empty() {
@@ -2649,23 +2649,23 @@ async fn op_fetch_url(
             req = req.body(current_body.clone());
         }
 
-        if let Some(ref counter) = in_flight {
+        if let Some(counter) = in_flight {
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         let resp = req.send().await.map_err(|e| {
-            if let Some(ref counter) = in_flight {
+            if let Some(counter) = in_flight {
                 counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
             deno_error::JsErrorBox::generic(e.to_string())
         })?;
 
-        if let Some(ref counter) = in_flight {
+        if let Some(counter) = in_flight {
             counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         if credentials_allowed {
-            if let Some(ref jar) = cookie_jar {
+            if let Some(jar) = cookie_jar {
                 if let Ok(parsed_url) = url::Url::parse(&current_url) {
                     for val in resp.headers().get_all(reqwest::header::SET_COOKIE) {
                         if let Ok(s) = val.to_str() {
@@ -2783,7 +2783,7 @@ async fn op_fetch_url(
         .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?;
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
-    if let Some(ref cbs) = callbacks {
+    if let Some(cbs) = callbacks {
         if cbs.has_response_callbacks().await {
             let resp = fetch_response(&url, status, resp_headers.clone(), resp_bytes.to_vec());
             let info = RequestInfo {
@@ -3021,7 +3021,7 @@ async fn stealth_fetch_all(
 
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
-    if let Some(ref cbs) = callbacks {
+    if let Some(cbs) = callbacks {
         if cbs.has_response_callbacks().await {
             let resp = fetch_response(&url, status, resp_headers.clone(), resp_bytes.clone());
             let info = RequestInfo {

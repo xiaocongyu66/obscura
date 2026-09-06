@@ -399,13 +399,13 @@ async fn main() -> anyhow::Result<()> {
                     .filter(|s| !s.is_empty())
             });
             print_banner(port);
-            if let Some(ref dir) = storage_dir {
+            if let Some(dir) = storage_dir {
                 tracing::info!("Storage dir: {}", dir.display());
             }
-            if let Some(ref proxy) = proxy {
+            if let Some(proxy) = proxy {
                 tracing::info!("Using proxy: {}", proxy);
             }
-            if let Some(ref ua) = user_agent {
+            if let Some(ua) = user_agent {
                 tracing::info!("User-Agent: {}", ua);
             }
             if stealth {
@@ -547,7 +547,7 @@ async fn main() -> anyhow::Result<()> {
         }
         None => {
             print_banner(args.port);
-            if let Some(ref proxy) = args.proxy {
+            if let Some(proxy) = args.proxy {
                 tracing::info!("Using proxy: {}", proxy);
             }
             obscura_cdp::start_with_options(args.port, args.proxy, stealth).await?;
@@ -575,14 +575,14 @@ async fn run_multi_worker_serve(
         let worker_port = port + 1 + i;
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("serve").arg("--port").arg(worker_port.to_string());
-        if let Some(ref p) = proxy {
+        if let Some(p) = proxy {
             // Pass the proxy (which may embed credentials) via the environment,
             // not argv. A --proxy flag is visible in `ps`/`/proc/<pid>/cmdline`
             // to any local user; OBSCURA_PROXY is only readable by the owner
             // (issue #366). The worker's serve path reads this env as a fallback.
             cmd.env("OBSCURA_PROXY", p);
         }
-        if let Some(ref ua) = user_agent {
+        if let Some(ua) = user_agent {
             cmd.arg("--user-agent").arg(ua);
         }
         if stealth {
@@ -776,7 +776,7 @@ async fn run_fetch(
         page.set_viewport(viewport);
     }
 
-    if let Some(ref ua) = user_agent {
+    if let Some(ua) = user_agent {
         page.http_client.set_user_agent(ua).await;
     }
 
@@ -892,7 +892,7 @@ async fn run_fetch(
     }
 
     if !eval_at_capture_boundary {
-        if let Some(ref expr) = eval {
+        if let Some(expr) = eval {
             // Bound the eval by the same budget as navigation so a runaway
             // expression (infinite loop, never-settling sync work) cannot hang.
             let result = page.evaluate_with_timeout(expr, Duration::from_secs(timeout_secs));
@@ -925,7 +925,7 @@ async fn run_fetch(
         }
     }
 
-    if let Some(ref sel) = selector {
+    if let Some(sel) = selector {
         let found = wait_for_selector(&mut page, sel, wait_secs).await;
         if !found {
             eprintln!("Warning: selector '{}' not found after {}s", sel, wait_secs);
@@ -935,7 +935,7 @@ async fn run_fetch(
     // --screenshot renders the settled, optionally evaluated page to a PNG.
     // Requires the render feature; without it, page.screenshot is absent and
     // we report clearly.
-    if let Some(ref path) = screenshot {
+    if let Some(path) = screenshot {
         #[cfg(feature = "render")]
         {
             let resource_deadline_ms = std::env::var("OBSCURA_RENDER_RESOURCE_DEADLINE_MS")
@@ -1017,7 +1017,7 @@ async fn run_fetch(
                     ))
                 });
             if eval_at_capture_boundary {
-                if let Some(ref expr) = eval {
+                if let Some(expr) = eval {
                     deferred_eval_output =
                         Some(page.evaluate_with_timeout(expr, Duration::from_secs(timeout_secs)));
                 }
@@ -1676,7 +1676,7 @@ async fn run_parallel_scrape(
                         .unwrap_or("")
                         .to_string();
 
-                    let eval_result = if let Some(ref expr) = *eval {
+                    let eval_result = if let Some(expr) = *eval {
                         let eval_cmd = serde_json::json!({"cmd": "evaluate", "expression": expr});
                         let mut line = serde_json::to_string(&eval_cmd).unwrap();
                         line.push('\n');
@@ -1796,7 +1796,7 @@ fn dump_links(page: &Page) -> String {
 
                 let full_url = if href.starts_with("http://") || href.starts_with("https://") {
                     href.clone()
-                } else if let Some(ref base) = base_url {
+                } else if let Some(base) = base_url {
                     base.join(&href)
                         .map(|u| u.to_string())
                         .unwrap_or(href.clone())

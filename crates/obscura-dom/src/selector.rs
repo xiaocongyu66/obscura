@@ -170,7 +170,7 @@ impl ToCss for PseudoClass {
             PseudoClass::Link => dest.write_str(":link"),
             PseudoClass::Visited => dest.write_str(":visited"),
             PseudoClass::Target => dest.write_str(":target"),
-            PseudoClass::Lang(ref lang) => {
+            PseudoClass::Lang(lang) => {
                 dest.write_str(":lang(")?;
                 dest.write_str(lang)?;
                 dest.write_str(")")
@@ -587,7 +587,7 @@ impl<'a> Element for DomElement<'a> {
             // :lang:元素(自身 lang 属性)或祖先的语言标签前缀匹配,
             // "-" 分隔的主子标签规则(RFC 4647 basic filtering)。继承沿
             // 父链向上(WPT 断言 inherited 行为)。
-            PseudoClass::Lang(ref want) => {
+            PseudoClass::Lang(want) => {
                 let mut cur = Some(self.node_id);
                 while let Some(nid) = cur {
                     let step = self.tree.with_node(nid, |n| {

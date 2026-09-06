@@ -132,13 +132,13 @@ fn build_ax_node(
         "role": ax_value_role(role),
     });
 
-    if let Some(ref pid) = parent_id {
+    if let Some(pid) = parent_id {
         ax_node.as_object_mut().unwrap().insert("parentId".into(), json!(pid));
     }
-    if let Some(ref n) = name {
+    if let Some(n) = name {
         ax_node.as_object_mut().unwrap().insert("name".into(), json!(ax_value_string(n)));
     }
-    if let Some(ref v) = value {
+    if let Some(v) = value {
         ax_node.as_object_mut().unwrap().insert("value".into(), json!(ax_value_string(v)));
     }
     if !properties.is_empty() {

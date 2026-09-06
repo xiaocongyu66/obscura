@@ -54,7 +54,7 @@ manual_string_new = "deny"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/h4ckf0r0day/obscura"
 authors = ["The Servo Project Developers"]
@@ -358,7 +358,7 @@ devtools = { package = "servo-devtools", path = "servo/components/devtools" }
 devtools_traits = { package = "servo-devtools-traits", path = "servo/components/shared/devtools" }
 dom_struct = { package = "servo-dom-struct", path = "servo/components/dom_struct" }
 embedder_traits = { package = "servo-embedder-traits", path = "servo/components/shared/embedder" }
-fonts = { package = "servo-fonts", path = "servo/components/fonts" }
+fonts = { package = "servo-fonts", path = "servo/components/fonts", features = ["bundled_freetype"] }
 fonts_traits = { package = "servo-fonts-traits", path = "servo/components/shared/fonts" }
 hyper_serde = { package = "servo-hyper-serde", path = "servo/components/hyper_serde" }
 jstraceable_derive = { package = "servo-jstraceable-derive", path = "servo/components/jstraceable_derive" }

@@ -1167,7 +1167,7 @@ impl ObscuraHttpClient {
                 }
             }
 
-            if let Some(ref proxy) = self.proxy_url {
+            if let Some(proxy) = self.proxy_url.clone() {
                 if let Ok(p) = reqwest::Proxy::all(proxy.as_str()) {
                     builder = builder.proxy(p);
                 }
@@ -1635,7 +1635,7 @@ impl ObscuraHttpClient {
             let mut req_builder = self.get_client().await.request(method.clone(), current_url.as_str())
                 .headers(headers);
 
-            if let Some(ref b) = body {
+            if let Some(b) = body.as_ref() {
                 if method == Method::POST {
                     req_builder = req_builder.header(
                         reqwest::header::CONTENT_TYPE,

@@ -83,7 +83,7 @@ impl BrowserContext {
         let cookie_jar = Arc::new(CookieJar::new());
 
         // Restore cookies from disk if storage_dir is configured
-        if let Some(ref dir) = storage_dir {
+        if let Some(dir) = storage_dir {
             let cookie_path = dir.join("cookies.json");
             if cookie_path.exists() {
                 match cookie_jar.load_from_file(&cookie_path) {
@@ -218,7 +218,7 @@ impl BrowserContext {
     /// Persist cookies to disk if storage_dir is configured.
     /// Called during graceful shutdown.
     pub fn save_cookies(&self) {
-        if let Some(ref dir) = self.storage_dir {
+        if let Some(dir) = self.storage_dir {
             let _ = std::fs::create_dir_all(dir);
             let cookie_path = dir.join("cookies.json");
             if let Err(e) = self.cookie_jar.save_to_file(&cookie_path) {

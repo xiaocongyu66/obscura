@@ -23,7 +23,7 @@ impl Browser {
     }
 
     pub fn build(config: BrowserConfig) -> Result<Self, Error> {
-        let context = if let Some(ref dir) = config.storage_dir {
+        let context = if let Some(dir) = config.storage_dir {
             BrowserContext::with_storage_full(
                 "api".to_string(),
                 config.proxy,

@@ -1384,7 +1384,7 @@ fn accumulate_scrolling_overflow(
             .unwrap_or(*rect)
     });
     if let Some(overflow) = translated {
-        let visible = if let Some(ref clip) = inherited_clip {
+        let visible = if let Some(clip) = inherited_clip.as_ref() {
             clip.intersect_rect(&overflow)
         } else {
             Some(overflow)
