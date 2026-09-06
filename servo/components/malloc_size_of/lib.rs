@@ -1264,6 +1264,7 @@ where
         self.start.size_of(ops) + self.end.size_of(ops)
     }
 }
+#[cfg(feature = "servo-taffy")]
 impl<T> MallocSizeOf for taffy::DetailedGridInfo<T>
 where
     T: MallocSizeOf + taffy::CheapCloneStr,
