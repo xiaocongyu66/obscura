@@ -518,7 +518,28 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         "Fetch" => domains::fetch::handle(method, &req.params, ctx, &req.session_id).await,
         "IO" => domains::io::handle(method, &req.params, ctx).await,
         "Input" if method == "humanType" => {
-            domains::human_input::handle("humanType", &req.params, ctx, &req.session_id)
+            let result = domains::human_input::handle("humanType", &req.params, ctx, &req.session_id);
+            if result.is_ok() {
+                // The per-key chain lives on setTimeout inside the page; drive
+                // the event loop for the typing schedule or keys never fire.
+                let total_ms: u64 = req
+                    .params
+                    .get("delays")
+                    .and_then(|d| d.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_u64()).sum())
+                    .unwrap_or(0)
+                    + 700;
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(total_ms),
+                    async {
+                        if let Some(page) = ctx.get_session_page_mut(&req.session_id) {
+                            page.settle(total_ms.saturating_sub(50)).await;
+                        }
+                    },
+                )
+                .await;
+            }
+            result
         }
         "Input" => domains::input::handle(method, &req.params, ctx, &req.session_id).await,
         "Emulation" => domains::emulation::handle(method, &req.params, ctx, &req.session_id).await,
