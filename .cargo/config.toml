@@ -19,3 +19,6 @@ split-debuginfo = "unpacked"
 lto = "thin"
 codegen-units = 16
 debug = "line-tables-only"
+
+[net]
+git-fetch-with-cli = true
