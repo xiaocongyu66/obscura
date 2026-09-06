@@ -40,4 +40,4 @@ jobs:
           cd servo-src
           rustc --version
           # 只验证 script 组依赖图能否解析 + mozjs-sys 能否在 CI 产出
-          cargo check -p script 2>&1 | tail -30
+          cargo check -p servo-script 2>&1 | tail -30
