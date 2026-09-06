@@ -377,7 +377,8 @@ pub async fn handle(
                     format!(
                         "function fire() {{\
                             var x = {target_x}, y = {target_y};\
-                            var target = globalThis.__obscura_click_target || document.body;\
+                            var target = (document.elementFromPoint && document.elementFromPoint(x, y)) || globalThis.__obscura_click_target || document.body;\
+                            globalThis.__obscura_click_target = target;\
                             seq++;\
                             try {{ globalThis.__obscura_engineInput({{kind:'pointerdown', seq:seq, ts:performance.now(), prev:[]}}); }} catch(e) {{}}\
                             var pd = globalThis.__obscura_markTrusted(new PointerEvent('pointerdown', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0.5,buttons:1}}));\
