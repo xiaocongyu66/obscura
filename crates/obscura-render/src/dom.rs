@@ -14,7 +14,7 @@ use taffy::prelude::*;
 
 use crate::dom_counters::resolve_css_counters;
 use crate::dom_invalidation::{add_container_query_reset_scopes, retained_style_plan, RetainedStylePlan};
-use crate::dom_tables::{apply_fit_content_widths, build_table, reliable_ratio_only_available_width, synthesize_row_rects, table_spacing};
+use crate::dom_tables::{apply_fit_content_widths, auto_table_percentage_intrinsic_floor, build_table, distribute_auto_table_columns, distribute_fixed_table_columns, reliable_declared_content_width, reliable_normal_flow_content_width, reliable_ratio_only_available_width, reliable_table_available_width, synthesize_row_rects, table_ancestor_depth, table_inline_outer_edges, table_spacing};
 use crate::dom_sticky::{DerivedGeometryState, DerivedLayoutState, StickyFrame, StickyLayout};
 use crate::{to_taffy_style, Rect};
 
@@ -11852,6 +11852,8 @@ fn build_children_with_float_zone(
 
 #[cfg(test)]
 mod tests {
+    use crate::dom_sticky::sticky_axis_position;
+    use crate::dom_tables::{apply_fit_content_widths, auto_table_percentage_intrinsic_floor, collect_table_rows, distribute_auto_table_columns, distribute_fixed_table_columns, reliable_declared_content_width, reliable_normal_flow_content_width, reliable_table_available_width, table_inline_outer_edges, synthesize_row_rects};
     use super::*;
     use obscura_dom::tree::ShadowRootMode;
     use obscura_dom::tree_sink::parse_html;
@@ -16883,6 +16885,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(test, feature = "paint"))]
     #[test]
     fn generated_pseudo_content_shapes_with_the_loaded_webfont() {
         let tree = parse_html(
