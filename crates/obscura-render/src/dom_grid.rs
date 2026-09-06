@@ -19,7 +19,8 @@ use crate::dom_sticky::{DerivedGeometryState, DerivedLayoutState, StickyFrame, S
 use crate::{to_taffy_style, Rect};
 
 use super::*;
-use crate::dom::{GeneratedBoxKind, IfcRegistry, rendered_children, rendered_parent, rendered_descendants, establishes_block_formatting_context};
+use crate::dom::{GeneratedBoxKind, IfcRegistry, rendered_children, rendered_parent, rendered_descendants};
+use crate::dom_floats::establishes_block_formatting_context;
 
 #[derive(Clone, Copy)]
 pub(crate) enum EffectiveGridChild {

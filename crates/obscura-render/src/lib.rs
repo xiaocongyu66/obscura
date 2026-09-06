@@ -31,6 +31,7 @@ mod dom_sticky;
 mod dom_invalidation;
 mod dom_tables;
 mod dom_entry;
+mod dom_floats;
 mod dom_grid;
 pub use dom_sticky::StickyLayout;
 pub use dom_entry::{layout_dom, layout_dom_with_images, layout_dom_with_resources};
