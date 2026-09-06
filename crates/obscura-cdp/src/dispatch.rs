@@ -38,6 +38,10 @@ pub(crate) struct ScreencastState {
 }
 
 pub struct CdpContext {
+    /// Monotonic engine input sequence, stamped onto events dispatched by
+    /// the Input domain so page script can distinguish engine-originated
+    /// input from synthetic `new MouseEvent(...)` constructions.
+    pub input_seq: std::sync::atomic::AtomicU64,
     pub pages: Vec<Page>,
     pub sessions: HashMap<String, String>, // session_id -> page_id
     /// Current document loader per page. Navigation events and later
@@ -161,6 +165,7 @@ impl CdpContext {
         valid_context_ids.insert(1);
         valid_context_ids.insert(2);
         CdpContext {
+            input_seq: std::sync::atomic::AtomicU64::new(0),
             pages: Vec::new(),
             sessions: HashMap::new(),
             current_loader_ids: HashMap::new(),
@@ -323,6 +328,12 @@ impl CdpContext {
     pub fn get_session_page(&self, session_id: &Option<String>) -> Option<&Page> {
         let page_id = session_id.as_ref().and_then(|sid| self.sessions.get(sid))?;
         self.get_page(page_id)
+    }
+
+    pub fn next_input_seq(&self) -> u64 {
+        self.input_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
     }
 
     pub fn get_session_page_mut(&mut self, session_id: &Option<String>) -> Option<&mut Page> {

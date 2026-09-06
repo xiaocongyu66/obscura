@@ -258,21 +258,26 @@ pub async fn handle(
                 // click. Hover matters to detection scripts: dispatch a real
                 // mousemove/pointermove pair at the element under the cursor,
                 // mirroring the mousePressed elementFromPoint resolution.
+                let seq = ctx.next_input_seq();
                 if let Some(page) = ctx.get_session_page_mut(session_id) {
                     let code = format!(
                         "(function() {{\
                             var target = (document.elementFromPoint && document.elementFromPoint({x},{y})) || document.body;\
                             if (!target) return;\
                             globalThis.__obscura_click_target = target;\
+                            try {{ globalThis.__obscura_engineInput({{kind:'pointermove', seq:{seq}, ts:performance.now(), prev:[]}}); }} catch(e) {{}}\
                             var mv = globalThis.__obscura_markTrusted(new MouseEvent('mousemove', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:0,buttons:0,detail:0}}));\
+                            try {{ Object.defineProperty(mv, '_engineSeq', {{value:{seq}}}); }} catch(e) {{}}\
                             target.dispatchEvent(mv);\
                             if (typeof PointerEvent === 'function') {{\
                                 var pv = globalThis.__obscura_markTrusted(new PointerEvent('pointermove', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0}}));\
+                                try {{ Object.defineProperty(pv, '_engineSeq', {{value:{seq}}}); }} catch(e) {{}}\
                                 target.dispatchEvent(pv);\
                             }}\
                         }})()",
                         x = x,
                         y = y,
+                        seq = seq,
                     );
                     page.evaluate(&code);
                 }
@@ -361,6 +366,7 @@ pub async fn handle(
                 .get("y")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
+            let seq_base = ctx.next_input_seq();
             if let Some(page) = ctx.get_session_page_mut(session_id) {
                 // When `press` is set the gesture completes inside this one
                 // evaluate: trajectory → mousedown → press gap → mouseup →
@@ -372,10 +378,26 @@ pub async fn handle(
                         "function fire() {{\
                             var x = {target_x}, y = {target_y};\
                             var target = globalThis.__obscura_click_target || document.body;\
-                            target.dispatchEvent(globalThis.__obscura_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:1,detail:1}})));\
+                            seq++;\
+                            try {{ globalThis.__obscura_engineInput({{kind:'pointerdown', seq:seq, ts:performance.now(), prev:[]}}); }} catch(e) {{}}\
+                            var pd = globalThis.__obscura_markTrusted(new PointerEvent('pointerdown', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0.5,buttons:1}}));\
+                            var md = globalThis.__obscura_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:1,detail:1}}));\
+                            try {{ Object.defineProperty(pd, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
+                            try {{ Object.defineProperty(md, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
+                            target.dispatchEvent(pd);\
+                            target.dispatchEvent(md);\
                             setTimeout(function() {{\
-                                target.dispatchEvent(globalThis.__obscura_markTrusted(new MouseEvent('mouseup', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:0,detail:1}})));\
-                                target.dispatchEvent(globalThis.__obscura_markTrusted(new MouseEvent('click', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:0,detail:1}})));\
+                                seq++;\
+                                try {{ globalThis.__obscura_engineInput({{kind:'pointerup', seq:seq, ts:performance.now(), prev:[]}}); }} catch(e) {{}}\
+                                var pu = globalThis.__obscura_markTrusted(new PointerEvent('pointerup', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0,buttons:0}}));\
+                                var mu = globalThis.__obscura_markTrusted(new MouseEvent('mouseup', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:0,detail:1}}));\
+                                var ck = globalThis.__obscura_markTrusted(new MouseEvent('click', {{bubbles:true,cancelable:true,view:globalThis,clientX:x,clientY:y,button:0,buttons:0,detail:1}}));\
+                                try {{ Object.defineProperty(pu, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
+                                try {{ Object.defineProperty(mu, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
+                                try {{ Object.defineProperty(ck, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
+                                target.dispatchEvent(pu);\
+                                target.dispatchEvent(mu);\
+                                target.dispatchEvent(ck);\
                             }}, {press_delay});\
                         }}\
                         setTimeout(fire, 60);"
@@ -383,27 +405,39 @@ pub async fn handle(
                 } else {
                     String::new()
                 };
+                // Per-step engine input metadata: seq increments per dispatched
+                // event, moves carry the raw samples since the previous dispatch
+                // as their coalesced history (like a real browser process batch).
                 let code = format!(
                     "(function() {{\
                         var pts = [{coords}];\
                         var i = 0;\
+                        var seq = {seq_base};\
+                        var prevPts = [];\
                         function step() {{\
                             if (i >= pts.length) {{ {click_seq} return; }}\
                             var p = pts[i++];\
                             var target = (document.elementFromPoint && document.elementFromPoint(p[0], p[1])) || document.body;\
                             if (target) {{\
                                 globalThis.__obscura_click_target = target;\
+                                seq++;\
+                                try {{ globalThis.__obscura_engineInput({{kind:'pointermove', seq:seq, ts:performance.now(), prev:prevPts}}); }} catch(e) {{}}\
+                                var pm = globalThis.__obscura_markTrusted(new PointerEvent('pointermove', {{bubbles:true,cancelable:true,view:globalThis,clientX:p[0],clientY:p[1],pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0}}));\
+                                try {{ Object.defineProperty(pm, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
+                                var mm = globalThis.__obscura_markTrusted(new MouseEvent('mousemove', {{bubbles:true,cancelable:true,view:globalThis,clientX:p[0],clientY:p[1],button:0,buttons:0,detail:0}}));\
+                                try {{ Object.defineProperty(mm, '_engineSeq', {{value:seq}}); }} catch(e) {{}}\
                                 try {{\
-                                    target.dispatchEvent(globalThis.__obscura_markTrusted(new MouseEvent('mousemove', {{bubbles:true,cancelable:true,view:globalThis,clientX:p[0],clientY:p[1],button:0,buttons:0,detail:0}})));\
-                                    if (typeof PointerEvent === 'function') {{\
-                                        target.dispatchEvent(globalThis.__obscura_markTrusted(new PointerEvent('pointermove', {{bubbles:true,cancelable:true,view:globalThis,clientX:p[0],clientY:p[1],pointerId:1,pointerType:'mouse',isPrimary:true,width:1,height:1,pressure:0}})));\
-                                    }}\
+                                    target.dispatchEvent(pm);\
+                                    target.dispatchEvent(mm);\
                                 }} catch (e) {{}}\
+                                prevPts.push([p[0], p[1], performance.now() - p[2]]);\
+                                if (prevPts.length > 6) prevPts.shift();\
                             }}\
                             setTimeout(step, p[2]);\
                         }}\
                         step();\
-                    }})()"
+                    }})()",
+                    seq_base = seq_base,
                 );
                 page.evaluate(&code);
             }

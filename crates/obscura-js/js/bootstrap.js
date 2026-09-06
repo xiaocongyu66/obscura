@@ -10676,6 +10676,27 @@ globalThis.DOMException = (function () {
 const _trustedEvents = new WeakSet();
 globalThis.__obscura_markTrusted = function(ev) { try { if (ev) _trustedEvents.add(ev); } catch (_e) {} return ev; };
 
+// Engine-side input pipeline signals. Chrome dispatches real input from the
+// browser process: the event's timeStamp comes from the input task's queue
+// time, pointermove batches coalesced samples, and mouse events carry a
+// sourceCapabilities device. Page JS synthesizing `new MouseEvent(...)` cannot
+// reproduce any of those, so this table — written only by the embedder —
+// fingerprints which events originated from the engine's input pipeline.
+const _inputSig = { seq: 0, last: null, coalesced: [] };
+globalThis.__obscura_engineInput = function(meta) {
+  // meta: { kind, clientX, clientY, buttons, seq, ts, prev: [...] }
+  try {
+    _inputSig.seq = meta.seq | 0;
+    _inputSig.last = meta;
+    if (meta.kind === 'pointermove' && meta.prev && meta.prev.length) {
+      _inputSig.coalesced = meta.prev;
+    } else {
+      _inputSig.coalesced = [];
+    }
+  } catch (_e) {}
+  return _inputSig.seq;
+};
+
 // Write value/checked through the element's *prototype* accessor, skipping any
 // per-instance property a framework layered on top. React (and Preact/Vue)
 // install a value tracker by redefining `value`/`checked` on the element to
@@ -10731,7 +10752,7 @@ globalThis.__obscura_setInputFiles = function(el, specs) {
   try { el.dispatchEvent(globalThis.__obscura_markTrusted(new Event("change", { bubbles: true }))); } catch (_e) {}
 };
 globalThis.Event = class Event {
-  constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=Date.now();this._propagationStopped=false;this._immediatePropagationStopped=false; }
+  constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=(function(){ try { return performance.now(); } catch (_e) { return Date.now(); } })();this._engineSeq=0;this._propagationStopped=false;this._immediatePropagationStopped=false; }
   get isTrusted() { return _trustedEvents.has(this); }
   // IE legacy 别名(React/老站点/WPT defaultPrevented 测试引用)
   get srcElement() { return this.target; }
@@ -15318,6 +15339,26 @@ _markNative(RTCPeerConnection); _markNative(RTCSessionDescription); _markNative(
 if (typeof PointerEvent === 'undefined') {
   globalThis.PointerEvent = class PointerEvent extends MouseEvent {
     constructor(type, opts={}) { super(type, opts); this.pointerId = opts.pointerId || 0; this.width = opts.width || 1; this.height = opts.height || 1; this.pressure = opts.pressure || 0; this.pointerType = opts.pointerType || 'mouse'; }
+    getCoalescedEvents() {
+      // Engine-dispatched moves replay the raw hardware samples the browser
+      // process queued between rAF ticks; synthetic events have none.
+      if (this._engineSeq && _inputSig.seq === this._engineSeq && _inputSig.coalesced.length) {
+        return _inputSig.coalesced.map(function(p) {
+          return { clientX: p[0], clientY: p[1], timeStamp: p[2], pointerId: 1, pointerType: 'mouse', width: 1, height: 1, pressure: 0 };
+        });
+      }
+      return [];
+    }
+  };
+}
+if (typeof PointerEvent !== 'undefined' && !PointerEvent.prototype.getCoalescedEvents) {
+  PointerEvent.prototype.getCoalescedEvents = function() {
+    if (this._engineSeq && _inputSig.seq === this._engineSeq && _inputSig.coalesced.length) {
+      return _inputSig.coalesced.map(function(p) {
+        return { clientX: p[0], clientY: p[1], timeStamp: p[2], pointerId: 1, pointerType: 'mouse', width: 1, height: 1, pressure: 0 };
+      });
+    }
+    return [];
   };
 }
 
