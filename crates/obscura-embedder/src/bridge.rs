@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use servo::keyboard_types::KeyboardEvent as KbEvent;
+use servo::{Code, Key, KeyState, KeyboardEvent as KbEvent};
 use servo::{
     DevicePoint, InputEvent, JSValue, KeyboardEvent, MouseButton, MouseButtonAction,
     MouseButtonEvent, MouseMoveEvent, Scroll, WebViewPoint, WebViewVector,
@@ -88,11 +88,11 @@ impl HeadlessServo {
     /// spec; `text` present only for printable keyDowns (char insertion).
     pub fn dispatch_key(&self, event_type: &str, key: &str, code: &str, text: Option<&str>) {
         let kb = KbEvent {
-            key: servo::keyboard_types::Key::Character(key.into()),
+            key: Key::Character(key.into()),
             code: code.into(),
             state: match event_type {
-                "keyUp" => servo::keyboard_types::KeyState::Up,
-                _ => servo::keyboard_types::KeyState::Down,
+                "keyUp" => KeyState::Up,
+                _ => KeyState::Down,
             },
             ..Default::default()
         };
