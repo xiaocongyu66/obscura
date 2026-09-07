@@ -20,16 +20,24 @@ fn main() {
     println!("evaluate returned: {r}");
     assert_eq!(r, "blue");
 
-    // The style change propagates layout → paint → composite over several
-    // frames; read back only after the framebuffer has settled.
-    let mut rgba = Vec::new();
-    for _ in 0..40 {
+    // take_screenshot is the official readback: it waits for the compositor
+    // to be rendering-up-to-date (manual read_to_image races the swap chain
+    // and intermittently returns the clear color).
+    let result: Rc<RefCell<Option<image::RgbaImage>>> = Rc::new(RefCell::new(None));
+    let slot = result.clone();
+    servo.webview().take_screenshot(None, move |res| match res {
+        Ok(img) => *slot.borrow_mut() = Some(img),
+        Err(e) => eprintln!("screenshot error: {e:?}"),
+    });
+    let img = loop {
         servo.spin();
         servo.render_frame();
+        if let Some(img) = result.borrow_mut().take() {
+            break img;
+        }
         std::thread::sleep(Duration::from_millis(16));
-        let (_, _, frame) = servo.read_back();
-        rgba = frame;
-    }
+    };
+    let rgba = img.into_raw();
     let blue = rgba.chunks_exact(4).filter(|p| p[2] > 180 && p[0] < 100).count();
     let total = (rgba.len() / 4) as f64;
     println!("blue-pixel ratio: {:.3}", blue as f64 / total);
