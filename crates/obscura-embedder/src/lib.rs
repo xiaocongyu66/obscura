@@ -66,6 +66,11 @@ impl HeadlessServo {
         self.servo.spin_event_loop();
     }
 
+    /// Render a compositor frame into the software framebuffer.
+    pub fn render_frame(&self) {
+        self.webview.paint();
+    }
+
     pub fn webview(&self) -> &WebView {
         &self.webview
     }

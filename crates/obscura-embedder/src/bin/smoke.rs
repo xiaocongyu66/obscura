@@ -18,6 +18,7 @@ fn main() {
     // Let a couple of frames render before the readback.
     for _ in 0..30 {
         servo.spin();
+        servo.render_frame();
         std::thread::sleep(Duration::from_millis(16));
     }
     let (w, h, rgba) = servo.screenshot_rgba().expect("screenshot");
