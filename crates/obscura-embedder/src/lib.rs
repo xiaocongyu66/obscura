@@ -37,7 +37,7 @@ pub struct HeadlessServo {
 impl HeadlessServo {
     /// Build a headless Servo instance with a viewport-sized software context.
     pub fn new(viewport: (u32, u32)) -> Result<Self, String> {
-        let size = servo::webrender_api::units::PhysicalSize::new(viewport.0, viewport.1);
+        let size = dpi::PhysicalSize::new(viewport.0, viewport.1);
         let rendering_context = Rc::new(
             SoftwareRenderingContext::new(size).map_err(|e| format!("rendering context: {e:?}"))?,
         );
@@ -85,9 +85,14 @@ impl HeadlessServo {
 
     /// Read the current framebuffer into RGBA bytes (width * height * 4).
     pub fn screenshot_rgba(&self) -> Result<(u32, u32, Vec<u8>), String> {
+        let size2d = self.rendering_context.size2d();
+        let rect = servo::DeviceIntRect::from_origin_and_size(
+            servo::DeviceIntPoint::zero(),
+            servo::DeviceIntSize::new(size2d.width as i32, size2d.height as i32),
+        );
         let image = self
             .rendering_context
-            .read_to_image(self.rendering_context.size2d())
+            .read_to_image(rect)
             .ok_or("read_to_image returned None")?;
         let w = image.width();
         let h = image.height();
