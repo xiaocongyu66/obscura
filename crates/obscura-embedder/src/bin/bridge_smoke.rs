@@ -81,5 +81,35 @@ fn main() {
     println!("click count: {clicks}");
     assert_eq!(clicks, "1", "trusted click through the kernel must run the handler");
 
+    // 3. keyboard: focus the input, dispatch 'a' keydown — keypress handler counts it
+    servo.evaluate_sync(
+        "document.body.innerHTML += '<input id=i>'; document.getElementById('i').addEventListener('keydown', function(e){ window.keys=(window.keys||0)+1; }); document.getElementById('i').focus(); 'ok'",
+        Duration::from_secs(10),
+    ).expect("setup input");
+    servo.dispatch_key("keyDown", "a", "KeyA", Some("a"));
+    for _ in 0..20 {
+        servo.spin();
+        servo.render_frame();
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    let keys = servo.evaluate_sync("String(window.keys||0)", Duration::from_secs(10))
+        .expect("keys eval");
+    println!("keydown count: {keys}");
+
+    // 4. wheel: scroll the page and read scrollY
+    servo.evaluate_sync(
+        "document.body.style.height='2000px'; 'tall'",
+        Duration::from_secs(10),
+    ).expect("tall page");
+    servo.dispatch_wheel(0.0, 300.0, 100.0, 100.0);
+    for _ in 0..20 {
+        servo.spin();
+        servo.render_frame();
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    let sy = servo.evaluate_sync("String(window.scrollY)", Duration::from_secs(10))
+        .expect("scroll eval");
+    println!("scrollY: {sy}");
+
     println!("BRIDGE OK — evaluate + real input pipeline live");
 }
