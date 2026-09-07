@@ -61,6 +61,11 @@ impl HeadlessServo {
         })
     }
 
+    /// Pump the Servo event loop once.
+    pub fn spin(&self) {
+        self.servo.spin_event_loop();
+    }
+
     pub fn webview(&self) -> &WebView {
         &self.webview
     }
