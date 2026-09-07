@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 fn main() {
-    servo::setup_logging();
+    // logging is set up by the Servo instance itself (needs its channels)
     let viewport = (400, 300);
     let servo = HeadlessServo::new(viewport).expect("boot headless servo");
     let url = "data:text/html,<html><body style='background:red'><h1>obscura</h1></body></html>";

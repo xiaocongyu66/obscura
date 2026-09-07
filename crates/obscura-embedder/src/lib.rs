@@ -46,6 +46,7 @@ impl HeadlessServo {
             .map_err(|e| format!("make_current: {e:?}"))?;
 
         let servo = ServoBuilder::default().build();
+        servo.setup_logging();
         let delegate = Rc::new(HeadlessDelegate {
             load_status: RefCell::new(None),
         });
