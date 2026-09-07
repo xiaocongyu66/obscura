@@ -4,7 +4,7 @@ on:
   workflow_dispatch: {}
   push:
     branches: [local-mods, servo-merge]
-    paths: ['.github/workflows/mozjs-probe.yml', 'servo/**', 'Cargo.toml']
+    paths: ['.github/workflows/mozjs-probe.yml', 'servo/**', 'Cargo.toml', 'crates/obscura-embedder/**']
 
 jobs:
   workspace-script-check:
@@ -20,6 +20,10 @@ jobs:
         run: cargo check -p servo-script --no-default-features 2>&1 | tail -30
       - name: cargo check obscura-embedder
         run: cargo check -p obscura-embedder 2>&1 | tail -30
+      - name: runtime smoke (boot + navigate + screenshot)
+        run: |
+          cargo build -p obscura-embedder --bin smoke 2>&1 | tail -5
+          ./target/debug/smoke
 
   probe:
     runs-on: ubuntu-24.04-arm
