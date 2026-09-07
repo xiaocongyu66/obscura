@@ -20,9 +20,16 @@ fn main() {
     println!("evaluate returned: {r}");
     assert_eq!(r, "blue");
 
-    servo.spin();
-    servo.render_frame();
-    let (_, _, rgba) = servo.read_back();
+    // The style change propagates layout → paint → composite over several
+    // frames; read back only after the framebuffer has settled.
+    let mut rgba = Vec::new();
+    for _ in 0..40 {
+        servo.spin();
+        servo.render_frame();
+        std::thread::sleep(Duration::from_millis(16));
+        let (_, _, frame) = servo.read_back();
+        rgba = frame;
+    }
     let blue = rgba.chunks_exact(4).filter(|p| p[2] > 180 && p[0] < 100).count();
     let total = (rgba.len() / 4) as f64;
     println!("blue-pixel ratio: {:.3}", blue as f64 / total);
