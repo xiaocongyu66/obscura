@@ -1,9 +1,12 @@
 //! Runtime smoke test: boot the headless Servo kernel, navigate to a
-//! data: URL, wait for Complete, screenshot, and assert the framebuffer
-//! is not blank. Exit 0 = kernel alive end to end.
+//! data: URL, wait for Complete, take an official screenshot (which waits
+//! for rendering up-to-date), and assert the page background made it into
+//! the pixels. Exit 0 = kernel alive end to end.
 
 use obscura_embedder::HeadlessServo;
 use servo::LoadStatus;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 fn main() {
@@ -15,33 +18,36 @@ fn main() {
     println!("load complete={complete} status={status:?}");
     assert_eq!(status, LoadStatus::Complete, "load must reach Complete");
 
-    // Let a couple of frames render before the readback.
-    for _ in 0..30 {
+    // Drive the compositor while waiting for the official screenshot —
+    // take_screenshot waits for rendering-up-to-date, and the compositor
+    // only makes progress while the embedder pumps.
+    let result: Rc<Cell<Option<image::RgbaImage>>> = Rc::new(Cell::new(None));
+    let slot = result.clone();
+    servo.webview().take_screenshot(None, move |res| {
+        match res {
+            Ok(img) => slot.set(Some(img)),
+            Err(e) => eprintln!("screenshot error: {e:?}"),
+        }
+    });
+    let img = loop {
         servo.spin();
         servo.render_frame();
+        if let Some(img) = result.take() {
+            break img;
+        }
         std::thread::sleep(Duration::from_millis(16));
-    }
-    let (w, h, rgba) = servo.screenshot_rgba().expect("screenshot");
-    println!("framebuffer {w}x{h} bytes={}", rgba.len());
+    };
+    let (w, h) = (img.width(), img.height());
+    let rgba = img.into_raw();
+    println!("screenshot {w}x{h} bytes={}", rgba.len());
     assert_eq!(w, viewport.0);
     assert_eq!(h, viewport.1);
 
-    // Red background: count strongly-red pixels. A blank/failed kernel
-    // would produce all-zero or uniform white output.
     let red = rgba.chunks_exact(4).filter(|p| p[0] > 180 && p[1] < 100 && p[2] < 100).count();
     let total = (w * h) as usize;
     let ratio = red as f64 / total as f64;
     println!("red-pixel ratio: {ratio:.3}");
-    // Diagnostics: what does the frame actually contain?
-    let mut uniq = std::collections::HashSet::new();
-    for p in rgba.chunks_exact(4) {
-        uniq.insert((p[0] / 32, p[1] / 32, p[2] / 32, p[3] / 32));
-    }
-    println!("unique-quantized-colors: {}", uniq.len());
     println!("first-pixel: {:?}", &rgba[..12]);
-    println!("mid-pixel: {:?}", &rgba[(total / 2) * 4..(total / 2) * 4 + 12]);
-    let all_zero = rgba.iter().all(|&b| b == 0);
-    println!("all-zero-frame: {all_zero}");
     assert!(ratio > 0.5, "background must be mostly red, got {ratio:.3}");
     println!("SMOKE OK — servo kernel rendered a live page");
 }

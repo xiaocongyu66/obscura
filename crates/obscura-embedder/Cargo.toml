@@ -11,7 +11,7 @@ servo = { path = "../../servo/components/servo", default-features = false, featu
 url.workspace = true
 dpi.workspace = true
 log.workspace = true
-image = { workspace = true, optional = true }
+image.workspace = true
 
 [features]
 default = []
