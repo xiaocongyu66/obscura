@@ -78,7 +78,9 @@ impl HeadlessServo {
         let start = Instant::now();
         loop {
             self.servo.spin_event_loop();
-            if self.delegate.load_status.borrow().is_some() {
+            // Poll the webview's own status — delegate callbacks only fire
+            // through the embedder event pump, which this loop drives.
+            if self.webview.load_status() == LoadStatus::Complete {
                 return Ok(true);
             }
             if start.elapsed() > deadline {
