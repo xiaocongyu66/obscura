@@ -6,11 +6,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use euclid::Point2D;
-use servo::embedder_traits::JSValue;
-use servo::webrender_api::units::DevicePoint;
 use servo::{
-    InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, WebViewPoint,
+    DevicePoint, InputEvent, JSValue, MouseButton, MouseButtonAction, MouseButtonEvent,
+    MouseMoveEvent, WebViewPoint,
 };
 
 fn device_point(x: f32, y: f32) -> WebViewPoint {
