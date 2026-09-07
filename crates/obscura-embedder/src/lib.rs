@@ -85,6 +85,14 @@ impl HeadlessServo {
     /// deadline passes. Returns whether the load reached `LoadStatus::Complete`.
     pub fn navigate(&self, url: &str, deadline: Duration) -> Result<bool, String> {
         let url = Url::parse(url).map_err(|e| format!("url parse: {e}"))?;
+        // Let the constellation finish registering the browsing context from
+        // the builder's NewWebView(about:blank) before sending LoadUrl —
+        // otherwise it warns "LoadUrl for unknown browsing context" and the
+        // load never starts.
+        for _ in 0..50 {
+            self.servo.spin_event_loop();
+            std::thread::sleep(Duration::from_millis(10));
+        }
         self.webview.load(url);
         let start = Instant::now();
         loop {
