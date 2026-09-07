@@ -124,6 +124,27 @@ impl HeadlessServo {
         }
     }
 
+    /// Blocking screenshot via the official take_screenshot path, pumping
+    /// the loop until the callback lands.
+    pub fn screenshot_rgba_blocking(&self, deadline: Duration) -> Vec<u8> {
+        let result: Rc<RefCell<Option<image::RgbaImage>>> = Rc::new(RefCell::new(None));
+        let slot = result.clone();
+        self.webview().take_screenshot(None, move |res| match res {
+            Ok(img) => *slot.borrow_mut() = Some(img),
+            Err(e) => eprintln!("screenshot error: {e:?}"),
+        });
+        let _ = deadline;
+        let img = loop {
+            self.spin();
+            self.render_frame();
+            if let Some(img) = result.borrow_mut().take() {
+                break img;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        };
+        img.into_raw()
+    }
+
     /// Read the current framebuffer into RGBA bytes (width * height * 4).
     pub fn screenshot_rgba(&self) -> Result<(u32, u32, Vec<u8>), String> {
         let size2d = self.rendering_context.size2d();
