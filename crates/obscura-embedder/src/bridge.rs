@@ -97,7 +97,7 @@ impl HeadlessServo {
             ..Default::default()
         };
         self.webview()
-            .notify_input_event(InputEvent::Keyboard(KeyboardEvent { event: kb }));
+            .notify_input_event(InputEvent::Keyboard(KeyboardEvent::new(kb)));
         self.spin();
     }
 
