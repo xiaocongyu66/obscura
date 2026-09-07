@@ -6,9 +6,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use servo::keyboard_types::KeyboardEvent as KbEvent;
 use servo::{
-    DevicePoint, InputEvent, JSValue, MouseButton, MouseButtonAction, MouseButtonEvent,
-    MouseMoveEvent, WebViewPoint,
+    DevicePoint, InputEvent, JSValue, KeyboardEvent, MouseButton, MouseButtonAction,
+    MouseButtonEvent, MouseMoveEvent, Scroll, WebViewPoint, WebViewVector,
 };
 
 fn device_point(x: f32, y: f32) -> WebViewPoint {
@@ -80,6 +81,33 @@ impl HeadlessServo {
             other => log::warn!("unmapped mouse event type: {other}"),
         }
         // Let the input event travel through constellation → script.
+        self.spin();
+    }
+
+    /// CDP Input.dispatchKeyEvent mapping. `key`/`code` per the UI Events
+    /// spec; `text` present only for printable keyDowns (char insertion).
+    pub fn dispatch_key(&self, event_type: &str, key: &str, code: &str, text: Option<&str>) {
+        let kb = KbEvent {
+            key: servo::keyboard_types::Key::Character(key.into()),
+            code: code.into(),
+            state: match event_type {
+                "keyUp" => servo::keyboard_types::KeyState::Up,
+                _ => servo::keyboard_types::KeyState::Down,
+            },
+            ..Default::default()
+        };
+        self.webview()
+            .notify_input_event(InputEvent::Keyboard(KeyboardEvent { event: kb }));
+        self.spin();
+    }
+
+    /// CDP Input.dispatchMouseEvent(mouseWheel) mapping: scroll the
+    /// scrollable area under the point.
+    pub fn dispatch_wheel(&self, dx: f32, dy: f32, x: f32, y: f32) {
+        self.webview().notify_scroll_event(
+            Scroll::Delta(WebViewVector::Device(servo::DeviceVector2D::new(dx, dy))),
+            device_point(x, y),
+        );
         self.spin();
     }
 }
