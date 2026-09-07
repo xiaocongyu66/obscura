@@ -14,6 +14,12 @@ fn main() {
     let ok = servo.navigate(url, Duration::from_secs(30)).expect("navigate");
     assert!(ok, "load completed");
 
+    // 0. baseline screenshot BEFORE touching anything: should be red.
+    let pre = servo.screenshot_rgba_blocking(Duration::from_secs(15));
+    println!("pre-eval first-pixel: {:?}", &pre[..8]);
+    let pre_red = pre.chunks_exact(4).filter(|p| p[0] > 180 && p[1] < 100).count();
+    println!("pre-eval red ratio: {:.3}", pre_red as f64 / (pre.len() / 4) as f64);
+
     // 1. evaluate: switch background to blue
     let r = servo.evaluate_sync(
         "document.body.style.background='blue'; document.body.style.background",
