@@ -10,6 +10,7 @@ servo = { path = "../../servo/components/servo", default-features = false, featu
 # 裁掉 Servo embedder 的重可选依赖(webgl/webxr/gamepad 走 default feature 关闭)
 url.workspace = true
 dpi.workspace = true
+euclid.workspace = true
 log.workspace = true
 image.workspace = true
 

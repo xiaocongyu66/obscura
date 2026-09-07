@@ -5,6 +5,8 @@
 //! loop ourselves, and expose load/screenshot so the CDP bridge can later
 //! point at a live Servo kernel instead of the legacy obscura-js engine.
 
+pub mod bridge;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
