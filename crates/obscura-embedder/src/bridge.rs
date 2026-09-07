@@ -40,21 +40,24 @@ impl HeadlessServo {
     /// Returns the JSValue serialized as a JSON-ish string, mirroring the
     /// legacy CDP Runtime.evaluate shape the Go client expects.
     pub fn evaluate_sync(&self, script: &str, deadline: Duration) -> Result<String, String> {
+        use std::cell::RefCell;
         let webview = self.webview().clone();
-        let slot: Rc<Cell<Option<Result<String, String>>>> = Rc::new(Cell::new(None));
+        let slot: Rc<RefCell<Option<Result<String, String>>>> = Rc::new(RefCell::new(None));
         let slot2 = slot.clone();
         webview.evaluate_javascript(script, move |result| {
             let s = match result {
                 Ok(v) => Ok(jsvalue_to_string(&v)),
                 Err(e) => Err(format!("eval error: {e:?}")),
             };
-            slot2.set(Some(s));
+            *slot2.borrow_mut() = Some(s);
         });
-        let ok = pump_until(self, || slot.get().is_some(), deadline);
+        let ok = pump_until(self, || slot.borrow().is_some(), deadline);
         if !ok {
             return Err("evaluate timed out".into());
         }
-        slot.take().unwrap_or_else(|| Err("no result".into()))
+        slot.borrow_mut()
+            .take()
+            .unwrap_or_else(|| Err("no result".into()))
     }
 
     /// CDP Input.dispatchMouseEvent mapping onto the kernel's real input
@@ -68,12 +71,12 @@ impl HeadlessServo {
             },
             "mousePressed" => {
                 self.webview().notify_input_event(InputEvent::MouseButton(
-                    MouseButtonEvent::new(MouseButtonAction::Down, MouseButton::Left, point),
+                    MouseButtonEvent::new(MouseButtonAction::Down, MouseButton::Primary, point),
                 ));
             },
             "mouseReleased" => {
                 self.webview().notify_input_event(InputEvent::MouseButton(
-                    MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Left, point),
+                    MouseButtonEvent::new(MouseButtonAction::Up, MouseButton::Primary, point),
                 ));
             },
             other => log::warn!("unmapped mouse event type: {other}"),
