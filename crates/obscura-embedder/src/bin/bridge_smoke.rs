@@ -4,6 +4,8 @@
 //! the click handler ran.
 
 use obscura_embedder::HeadlessServo;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 fn main() {
