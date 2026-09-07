@@ -29,7 +29,19 @@ fn main() {
     assert!(blue as f64 / total > 0.5, "bg must now be blue");
 
     // 2. real input pipeline: click the button at its coordinates
-    //    (button is at the top-left of body; click near 30, 20)
+    let r = servo.evaluate_sync(
+        "(function(){
+  window.__evts = [];
+  for (const t of ['mousemove','mousedown','mouseup','click']) {
+    document.addEventListener(t, function(e){ window.__evts.push(t+'@'+e.clientX+','+e.clientY+'->'+(e.target.id||e.target.tagName)+'|trusted='+e.isTrusted); }, true);
+  }
+  var el = document.elementFromPoint(30, 20);
+  var b = document.getElementById('btn').getBoundingClientRect();
+  return JSON.stringify({hit: el ? el.tagName + '/' + (el.id||'') : null, btn: [b.x, b.y, b.width, b.height]});
+})()",
+        Duration::from_secs(10),
+    ).expect("diagnostic eval");
+    println!("hit-test: {r}");
     servo.dispatch_mouse("mouseMoved", 30.0, 20.0);
     servo.dispatch_mouse("mousePressed", 30.0, 20.0);
     servo.dispatch_mouse("mouseReleased", 30.0, 20.0);
@@ -38,6 +50,9 @@ fn main() {
         servo.render_frame();
         std::thread::sleep(Duration::from_millis(16));
     }
+    let evts = servo.evaluate_sync("JSON.stringify(window.__evts||[])", Duration::from_secs(10))
+        .expect("events eval");
+    println!("captured events: {evts}");
     let clicks = servo.evaluate_sync("String(window.clicked||0)", Duration::from_secs(10))
         .expect("evaluate 2");
     println!("click count: {clicks}");
