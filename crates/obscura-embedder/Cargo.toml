@@ -15,5 +15,3 @@ image.workspace = true
 
 [features]
 default = []
-# 截图输出(image encode PNG)
-screenshot = ["dep:image"]
