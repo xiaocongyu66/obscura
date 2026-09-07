@@ -32,6 +32,16 @@ fn main() {
     let total = (w * h) as usize;
     let ratio = red as f64 / total as f64;
     println!("red-pixel ratio: {ratio:.3}");
+    // Diagnostics: what does the frame actually contain?
+    let mut uniq = std::collections::HashSet::new();
+    for p in rgba.chunks_exact(4) {
+        uniq.insert((p[0] / 32, p[1] / 32, p[2] / 32, p[3] / 32));
+    }
+    println!("unique-quantized-colors: {}", uniq.len());
+    println!("first-pixel: {:?}", &rgba[..12]);
+    println!("mid-pixel: {:?}", &rgba[(total / 2) * 4..(total / 2) * 4 + 12]);
+    let all_zero = rgba.iter().all(|&b| b == 0);
+    println!("all-zero-frame: {all_zero}");
     assert!(ratio > 0.5, "background must be mostly red, got {ratio:.3}");
     println!("SMOKE OK — servo kernel rendered a live page");
 }
