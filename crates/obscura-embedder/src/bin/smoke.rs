@@ -33,8 +33,17 @@ fn main() {
         servo.spin();
         servo.render_frame();
         if let Some(img) = result.take() {
+            // Diagnose both buffer orders: read back BEFORE present too.
+            let pre = servo.read_back();
+            let mut uniq = std::collections::HashSet::new();
+            for p in pre.2.chunks_exact(4) {
+                uniq.insert((p[0] / 32, p[1] / 32, p[2] / 32, p[3] / 32));
+            }
+            println!("pre-present readback: {}x{} uniq-colors={} first={:?}",
+                pre.0, pre.1, uniq.len(), &pre.2[..8]);
             break img;
         }
+        servo.present();
         std::thread::sleep(Duration::from_millis(16));
     };
     let (w, h) = (img.width(), img.height());

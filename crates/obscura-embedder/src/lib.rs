@@ -71,6 +71,11 @@ impl HeadlessServo {
         self.webview.paint();
     }
 
+    /// Swap the back buffer to the readable side.
+    pub fn present(&self) {
+        let _ = self.rendering_context.present();
+    }
+
     pub fn webview(&self) -> &WebView {
         &self.webview
     }
@@ -92,6 +97,19 @@ impl HeadlessServo {
                 return Ok(false);
             }
             std::thread::sleep(Duration::from_millis(8));
+        }
+    }
+
+    /// Read the current framebuffer into RGBA bytes (width * height * 4).
+    pub fn read_back(&self) -> (u32, u32, Vec<u8>) {
+        let size2d = self.rendering_context.size2d();
+        let rect = servo::DeviceIntRect::from_origin_and_size(
+            servo::DeviceIntPoint::zero(),
+            servo::DeviceIntSize::new(size2d.width as i32, size2d.height as i32),
+        );
+        match self.rendering_context.read_to_image(rect) {
+            Some(img) => (img.width(), img.height(), img.into_raw()),
+            None => (size2d.width, size2d.height, vec![0; (size2d.width * size2d.height * 4) as usize]),
         }
     }
 
