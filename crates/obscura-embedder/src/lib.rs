@@ -7,6 +7,7 @@
 
 pub mod bridge;
 pub mod fingerprint;
+mod user_agents;
 pub mod cdp_server;
 pub mod tools;
 

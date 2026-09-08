@@ -1,82 +1,219 @@
-//! Session fingerprint: UA from fake_user_agent's hard-coded pool, with
-//! sec-ch-ua/platform derived from the parsed Chrome version so the HTTP
-//! layer and JS-visible navigator stay coherent.
+//! obscura-embedder: drives the vendored Servo engine headlessly.
+//!
+//! Phase 2 of the Servo migration (docs/SERVO_MIGRATION.md): assemble a
+//! SoftwareRenderingContext + WebView without any display, pump the event
+//! loop ourselves, and expose load/screenshot so the CDP bridge can later
+//! point at a live Servo kernel instead of the legacy obscura-js engine.
 
-use serde::{Deserialize, Serialize};
+pub mod bridge;
+pub mod fingerprint;
+mod user_agents;
+pub mod cdp_server;
+pub mod tools;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UaProfile {
-    pub user_agent: String,
-    pub ch_ua: String,
-    pub ch_ua_platform: String,
-    pub ch_ua_mobile: String,
-    /// TLS impersonation profile (bogdanfinn/tls-client naming)
-    pub impersonate: String,
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use servo::{
+    LoadStatus, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext, WebView,
+    WebViewBuilder, WebViewDelegate,
+};
+use url::Url;
+
+/// Delegate that just records load-status transitions; the harness polls.
+pub struct HeadlessDelegate {
+    pub load_status: RefCell<Option<LoadStatus>>,
 }
 
-/// Chrome versions with matching TLS profiles (bogdanfinn/tls-client
-/// supports 131/124/120/110).
-const TLS_SUPPORTED_VERSIONS: &[u32] = &[131, 124, 120, 110];
-
-/// Pick a Chrome UA from fake_user_agent and derive the coherent
-/// client-hint + TLS profile. Returns None if the picked UA's Chrome
-/// version has no matching TLS profile (retry for another).
-pub fn random_profile() -> Option<UaProfile> {
-    let ua = fake_user_agent::get_chrome_rua().to_string();
-    from_ua(&ua)
-}
-
-/// Build a profile from an explicit UA string.
-pub fn from_ua(ua: &str) -> Option<UaProfile> {
-    // Chrome/<major>
-    let version: u32 = ua
-        .split("Chrome/")
-        .nth(1)?
-        .split('.')
-        .next()?
-        .parse()
-        .ok()?;
-    if !TLS_SUPPORTED_VERSIONS.contains(&version) {
-        return None;
+impl WebViewDelegate for HeadlessDelegate {
+    fn notify_load_status_changed(&self, _webview: servo::WebView, status: LoadStatus) {
+        *self.load_status.borrow_mut() = Some(status);
     }
-    let platform = if ua.contains("Macintosh") {
-        "\"macOS\""
-    } else if ua.contains("Windows") {
-        "\"Windows\""
-    } else {
-        "\"Linux\""
-    };
-    let mobile = "?0";
-    // sec-ch-ua GREASE ordering follows the version's era.
-    let ch_ua = match version {
-        131..=u32::MAX => {
-            "\"Google Chrome\";v=\"{v}\", \"Chromium\";v=\"{v}\", \"Not_A Brand\";v=\"24\""
-                .replace("{v}", &version.to_string())
-        },
-        124..=130 => {
-            "\"Chromium\";v=\"{v}\", \"Google Chrome\";v=\"{v}\", \"Not-A.Brand\";v=\"99\""
-                .replace("{v}", &version.to_string())
-        },
-        _ => "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"{v}\", \"Google Chrome\";v=\"{v}\""
-            .replace("{v}", &version.to_string()),
-    };
-    Some(UaProfile {
-        user_agent: ua.into(),
-        ch_ua,
-        ch_ua_platform: platform.into(),
-        ch_ua_mobile: mobile.into(),
-        impersonate: format!("chrome{version}"),
-    })
 }
 
-/// Explicit version+platform profile (deterministic sessions).
-pub fn profile_for(version: u32, platform: &str) -> Option<UaProfile> {
-    let host = match platform {
-        "macOS" => "Macintosh; Intel Mac OS X 10_15_7",
-        "Windows" => "Windows NT 10.0; Win64; x64",
-        _ => "X11; Linux x86_64",
-    };
-    from_ua(&format!(
-        "Mozilla/5.0 ({host}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version}.0.0.0 Safari/537.36"
-    ))
+pub struct HeadlessServo {
+    servo: Servo,
+    rendering_context: Rc<SoftwareRenderingContext>,
+    webview: WebView,
+    #[allow(dead_code)]
+    delegate: Rc<HeadlessDelegate>,
+}
+
+/// Registrable-root approximation: last two labels (or three for
+/// co.uk-style suffixes). Good enough for "did the load land" checks.
+fn root_domain(host: &str) -> String {
+    let parts: Vec<&str> = host.trim_end_matches('.').split('.').collect();
+    if parts.len() >= 3 {
+        let two_last = parts[parts.len() - 2..].join(".");
+        let common = ["co.uk", "com.cn", "com.hk", "com.tw", "com.au", "co.jp", "com.br"];
+        if common.iter().any(|s| host.ends_with(*s)) {
+            return parts[parts.len() - 3..].join(".");
+        }
+    }
+    if parts.len() >= 2 {
+        parts[parts.len() - 2..].join(".")
+    } else {
+        host.to_string()
+    }
+}
+
+impl HeadlessServo {
+    /// Build a headless Servo instance with a viewport-sized software context.
+    pub fn new(viewport: (u32, u32)) -> Result<Self, String> {
+        let profile = crate::fingerprint::random_profile()
+            .ok_or("no TLS-compatible Chrome profile")?;
+        Self::new_with_profile(viewport, profile)
+    }
+
+    /// Boot with an explicit fingerprint profile: the UA preference carries
+    /// the profile's Chrome UA so the HTTP layer and the JS-visible
+    /// navigator agree.
+    pub fn new_with_profile(
+        viewport: (u32, u32),
+        profile: &crate::fingerprint::UaProfile,
+    ) -> Result<Self, String> {
+        let size = dpi::PhysicalSize::new(viewport.0, viewport.1);
+        let rendering_context = Rc::new(
+            SoftwareRenderingContext::new(size).map_err(|e| format!("rendering context: {e:?}"))?,
+        );
+        rendering_context
+            .make_current()
+            .map_err(|e| format!("make_current: {e:?}"))?;
+
+        let servo = ServoBuilder::default().build();
+        servo.setup_logging();
+        // Servo's default UA carries a "Servo/" token that anti-bot layers
+        // (Bing, Cloudflare) treat as a bot signal. Present a Chrome UA.
+        servo.set_preference("user_agent", servo::PrefValue::Str(profile.user_agent.clone()));
+        let delegate = Rc::new(HeadlessDelegate {
+            load_status: RefCell::new(None),
+        });
+        let webview =
+            WebViewBuilder::new(&servo, rendering_context.clone() as Rc<dyn RenderingContext>)
+                .delegate(delegate.clone())
+                .build();
+        Ok(Self {
+            servo,
+            rendering_context,
+            webview,
+            delegate,
+        })
+    }
+
+    /// Pump the Servo event loop once.
+    pub fn spin(&self) {
+        self.servo.spin_event_loop();
+    }
+
+    /// Render a compositor frame into the software framebuffer.
+    pub fn render_frame(&self) {
+        self.webview.paint();
+    }
+
+    /// Swap the back buffer to the readable side.
+    pub fn present(&self) {
+        let _ = self.rendering_context.present();
+    }
+
+    pub fn webview(&self) -> &WebView {
+        &self.webview
+    }
+
+    /// Navigate to a URL and pump the event loop until load completes or the
+    /// deadline passes. Returns whether the load reached `LoadStatus::Complete`.
+    pub fn navigate(&self, url: &str, deadline: Duration) -> Result<bool, String> {
+        let target = Url::parse(url).map_err(|e| format!("url parse: {e}"))?;
+        // Let the constellation finish registering the browsing context from
+        // the builder's NewWebView(about:blank) before sending LoadUrl —
+        // otherwise it warns "LoadUrl for unknown browsing context" and the
+        // load never starts.
+        for _ in 0..50 {
+            self.servo.spin_event_loop();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.webview.load(target.clone());
+        let start = Instant::now();
+        loop {
+            self.servo.spin_event_loop();
+            // Complete alone is not enough: the about:blank initial load also
+            // completes, so require the visible URL to have reached the
+            // target host as well (redirects keep the host suffix family).
+            let at_target = self
+                .webview
+                .url()
+                .map(|cur| {
+                    // Redirects move hosts freely (cn.bing.com →
+                    // www.bing.com), so compare registrable root domains.
+                    match (cur.host_str(), target.host_str()) {
+                        (Some(a), Some(b)) => root_domain(a) == root_domain(b),
+                        (None, None) => target.scheme() == cur.scheme(),
+                        _ => false,
+                    }
+                })
+                .unwrap_or(false);
+            if at_target && self.webview.load_status() == LoadStatus::Complete {
+                return Ok(true);
+            }
+            if start.elapsed() > deadline {
+                log::warn!(
+                    "navigate deadline: url={:?} status={:?}",
+                    self.webview.url(),
+                    self.webview.load_status()
+                );
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(8));
+        }
+    }
+
+    /// Read the current framebuffer into RGBA bytes (width * height * 4).
+    pub fn read_back(&self) -> (u32, u32, Vec<u8>) {
+        let size2d = self.rendering_context.size2d();
+        let rect = servo::DeviceIntRect::from_origin_and_size(
+            servo::DeviceIntPoint::zero(),
+            servo::DeviceIntSize::new(size2d.width as i32, size2d.height as i32),
+        );
+        match self.rendering_context.read_to_image(rect) {
+            Some(img) => (img.width(), img.height(), img.into_raw()),
+            None => (size2d.width, size2d.height, vec![0; (size2d.width * size2d.height * 4) as usize]),
+        }
+    }
+
+    /// Blocking screenshot via the official take_screenshot path, pumping
+    /// the loop until the callback lands.
+    pub fn screenshot_rgba_blocking(&self, deadline: Duration) -> (u32, u32, Vec<u8>) {
+        let result: Rc<RefCell<Option<image::RgbaImage>>> = Rc::new(RefCell::new(None));
+        let slot = result.clone();
+        self.webview().take_screenshot(None, move |res| match res {
+            Ok(img) => *slot.borrow_mut() = Some(img),
+            Err(e) => eprintln!("screenshot error: {e:?}"),
+        });
+        let _ = deadline;
+        let img = loop {
+            self.spin();
+            self.render_frame();
+            if let Some(img) = result.borrow_mut().take() {
+                break img;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        };
+        (img.width(), img.height(), img.into_raw())
+    }
+
+    /// Read the current framebuffer into RGBA bytes (width * height * 4).
+    pub fn screenshot_rgba(&self) -> Result<(u32, u32, Vec<u8>), String> {
+        let size2d = self.rendering_context.size2d();
+        let rect = servo::DeviceIntRect::from_origin_and_size(
+            servo::DeviceIntPoint::zero(),
+            servo::DeviceIntSize::new(size2d.width as i32, size2d.height as i32),
+        );
+        let image = self
+            .rendering_context
+            .read_to_image(rect)
+            .ok_or("read_to_image returned None")?;
+        let w = image.width();
+        let h = image.height();
+        Ok((w, h, image.into_raw()))
+    }
 }
