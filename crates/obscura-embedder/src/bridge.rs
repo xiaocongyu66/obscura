@@ -87,7 +87,7 @@ impl HeadlessServo {
     /// CDP Input.dispatchKeyEvent mapping. `key`/`code` per the UI Events
     /// spec; `text` present only for printable keyDowns (char insertion).
     pub fn dispatch_key(&self, event_type: &str, key: &str, code: &str, text: Option<&str>) {
-        let kb = KbEvent {
+        let kb = keyboard_types::KeyboardEvent {
             key: Key::Character(key.into()),
             code: code.into(),
             state: match event_type {
