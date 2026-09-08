@@ -6,9 +6,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-
+use keyboard_types::{Key, KeyState};
 use servo::{
-    DevicePoint, InputEvent, JSValue, KeyboardEvent, MouseButton, MouseButtonAction,
+    DevicePoint, DeviceVector2D, InputEvent, JSValue, KeyboardEvent, MouseButton, MouseButtonAction,
     MouseButtonEvent, MouseMoveEvent, Scroll, WebViewPoint, WebViewVector,
 };
 
