@@ -96,7 +96,7 @@ impl HeadlessServo {
     /// Navigate to a URL and pump the event loop until load completes or the
     /// deadline passes. Returns whether the load reached `LoadStatus::Complete`.
     pub fn navigate(&self, url: &str, deadline: Duration) -> Result<bool, String> {
-        let url = Url::parse(url).map_err(|e| format!("url parse: {e}"))?;
+        let target = Url::parse(url).map_err(|e| format!("url parse: {e}"))?;
         // Let the constellation finish registering the browsing context from
         // the builder's NewWebView(about:blank) before sending LoadUrl —
         // otherwise it warns "LoadUrl for unknown browsing context" and the
@@ -105,13 +105,25 @@ impl HeadlessServo {
             self.servo.spin_event_loop();
             std::thread::sleep(Duration::from_millis(10));
         }
-        self.webview.load(url);
+        self.webview.load(target.clone());
         let start = Instant::now();
         loop {
             self.servo.spin_event_loop();
-            // Poll the webview's own status — delegate callbacks only fire
-            // through the embedder event pump, which this loop drives.
-            if self.webview.load_status() == LoadStatus::Complete {
+            // Complete alone is not enough: the about:blank initial load also
+            // completes, so require the visible URL to have reached the
+            // target host as well (redirects keep the host suffix family).
+            let at_target = self
+                .webview
+                .url()
+                .map(|cur| {
+                    match (cur.host_str(), target.host_str()) {
+                        (Some(a), Some(b)) => a == b || a.ends_with(b) || b.ends_with(a),
+                        (None, None) => target.scheme() == cur.scheme(),
+                        _ => false,
+                    }
+                })
+                .unwrap_or(false);
+            if at_target && self.webview.load_status() == LoadStatus::Complete {
                 return Ok(true);
             }
             if start.elapsed() > deadline {
