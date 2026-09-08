@@ -101,7 +101,7 @@ impl HeadlessServo {
                 "ArrowUp" => keyboard_types::Code::ArrowUp,
                 "ArrowLeft" => keyboard_types::Code::ArrowLeft,
                 "ArrowRight" => keyboard_types::Code::ArrowRight,
-                other => code.parse().unwrap_or(keyboard_types::Code::Unknown),
+                other => code.parse().unwrap_or(keyboard_types::Code::Unidentified),
             },
             state: match event_type {
                 "keyUp" => KeyState::Up,
