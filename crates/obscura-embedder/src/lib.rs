@@ -63,7 +63,7 @@ impl HeadlessServo {
     pub fn new(viewport: (u32, u32)) -> Result<Self, String> {
         let profile = crate::fingerprint::random_profile()
             .ok_or("no TLS-compatible Chrome profile")?;
-        Self::new_with_profile(viewport, profile)
+        Self::new_with_profile(viewport, &profile)
     }
 
     /// Boot with an explicit fingerprint profile: the UA preference carries
