@@ -132,12 +132,9 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     kernel: Arc<KernelHandle>,
 ) -> Result<(), String> {
-    let mut ws = tokio_tungstenite::accept_hdr_with_config(
-        stream,
-        |_req, resp| Ok(resp),
-        Some(WebSocketConfig::default()),
-    )
-    .map_err(|e| format!("ws accept: {e}"))?;
+    let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(WebSocketConfig::default()))
+        .await
+        .map_err(|e| format!("ws accept: {e}"))?;
 
     // Session state per connection (flatten CDP: one synthetic session id).
     let session_id = "servo-session-1";
