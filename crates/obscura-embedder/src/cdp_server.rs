@@ -221,17 +221,13 @@ async fn handle_connection(
             },
             "Page.captureScreenshot" => match kernel.call(KernelCmd::Screenshot) {
                 KernelReply::Png(w, h, rgba) => {
-                    let buf = image::ImageBuffer::from_raw(w, h, rgba).ok_or("bad frame")?;
-                    let img = image::RgbaImage::from_raw(buf);
+                    let buf = image::RgbaImage::from_raw(w, h, rgba).ok_or("bad frame")?;
                     let mut png = Vec::new();
-                    let _ = image::DynamicImage::ImageRgba8(img)
-                        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png);
+                    image::DynamicImage::ImageRgba8(buf)
+                        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                        .map_err(|e| format!("png encode: {e}"))?;
                     let b64 = base64::engine::general_purpose::STANDARD.encode(png);
-                    to_response(
-                        id,
-                        KernelReply::Ok(json!({})),
-                        json!({ "data": b64 }),
-                    )
+                    to_response(id, KernelReply::Ok(json!({})), json!({ "data": b64 }))
                 },
                 KernelReply::Err(e) => error_response(id, e),
                 _ => error_response(id, "unexpected reply"),
@@ -249,7 +245,7 @@ async fn handle_connection(
         };
 
         let out = serde_json::to_string(&response).map_err(|e| e.to_string())?;
-        ws.send(tokio_tungstenite::tungstenite::Message::Text(out))
+        ws.send(tokio_tungstenite::tungstenite::Message::text(out))
             .await
             .map_err(|e| format!("ws write: {e}"))?;
     }
@@ -275,6 +271,6 @@ impl MergeOk for Value {
     }
 }
 
-fn error_response(id: i64, message: String) -> Value {
+fn error_response(id: i64, message: impl Into<String>) -> Value {
     json!({ "id": id, "error": { "code": -32601, "message": message } })
 }
