@@ -11,6 +11,7 @@ servo = { path = "../../servo/components/servo", default-features = false, featu
 url.workspace = true
 dpi.workspace = true
 euclid.workspace = true
+keyboard-types = "0.8.3"
 log.workspace = true
 image.workspace = true
 
