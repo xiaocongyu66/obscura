@@ -21,17 +21,23 @@ const TLS_SUPPORTED_VERSIONS: &[u32] = &[131, 124, 120, 110];
 /// Pick a random Chrome UA from the vendored list and derive the coherent
 /// client-hint + TLS profile. None if the picked version lacks a TLS match.
 pub fn random_profile() -> Option<UaProfile> {
-    let ua = {
-        use crate::user_agents::CHROME_USER_AGENTS;
-        let idx = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as usize)
-            .unwrap_or(0)
-            ^ (std::process::id() as usize)
-            ^ (CHROME_USER_AGENTS.as_ptr() as usize);
-        CHROME_USER_AGENTS[idx % CHROME_USER_AGENTS.len()].to_string()
-    };
-    from_ua(&ua)
+    use crate::user_agents::CHROME_USER_AGENTS;
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0)
+        ^ (std::process::id() as usize)
+        ^ (CHROME_USER_AGENTS.as_ptr() as usize);
+    // Only a slice of the 854-UA pool carries a TLS-matched version; retry
+    // a bounded number of times, then fall back to a constructed profile.
+    for _ in 0..64 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let ua = CHROME_USER_AGENTS[seed % CHROME_USER_AGENTS.len()];
+        if let Some(p) = from_ua(ua) {
+            return Some(p);
+        }
+    }
+    profile_by_index(seed)
 }
 
 /// Build a profile from an explicit UA string.
