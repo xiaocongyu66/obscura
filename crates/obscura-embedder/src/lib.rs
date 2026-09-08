@@ -51,6 +51,14 @@ impl HeadlessServo {
 
         let servo = ServoBuilder::default().build();
         servo.setup_logging();
+        // Servo's default UA carries a "Servo/" token that anti-bot layers
+        // (Bing, Cloudflare) treat as a bot signal. Present a Chrome UA.
+        servo.set_preference(
+            "user_agent",
+            servo::PrefValue::String(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".into(),
+            ),
+        );
         let delegate = Rc::new(HeadlessDelegate {
             load_status: RefCell::new(None),
         });
