@@ -10,20 +10,17 @@ use crate::HeadlessServo;
 /// Supported engines for the search tool.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SearchEngine {
-    /// 中国必应(cn.bing.com)
+    /// 中国必应(cn.bing.com)— 默认引擎
     Bing,
     /// 百度(www.baidu.com)
     Baidu,
-    /// Google(非中国区出口时可用)
-    Google,
 }
 
 impl SearchEngine {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
-            "bing" | "cn-bing" | "cn_bing" => Some(Self::Bing),
+            "bing" | "cn-bing" | "cn_bing" | "" => Some(Self::Bing),
             "baidu" => Some(Self::Baidu),
-            "google" => Some(Self::Google),
             _ => None,
         }
     }
@@ -33,7 +30,6 @@ impl SearchEngine {
         match self {
             Self::Bing => format!("https://cn.bing.com/search?q={q}&ensearch=0"),
             Self::Baidu => format!("https://www.baidu.com/s?wd={q}&ie=utf-8"),
-            Self::Google => format!("https://www.google.com/search?q={q}&num=10"),
         }
     }
 }
@@ -84,17 +80,6 @@ fn extraction_js(engine: SearchEngine) -> &'static str {
     if (!a) return;
     var sn = d.querySelector('.c-abstract, [class*=content-right], .c-span-last');
     out.push({title: (a.innerText||'').trim(), url: a.href||'', snippet: (sn?sn.innerText:'').trim()});
-  });
-  return JSON.stringify(out.slice(0, 10));
-})()"#,
-        SearchEngine::Google => r#"
-(function(){
-  var out = [];
-  document.querySelectorAll('div.g, div[data-sokoban-container]').forEach(function(d){
-    var a = d.querySelector('a[href^="http"]');
-    var h = d.querySelector('h3');
-    if (!a || !h) return;
-    out.push({title: (h.innerText||'').trim(), url: a.href||'', snippet: (d.innerText||'').slice(0, 300)});
   });
   return JSON.stringify(out.slice(0, 10));
 })()"#,
