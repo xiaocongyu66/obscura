@@ -19,7 +19,7 @@ jobs:
       - name: cargo check servo-script (vendored workspace)
         run: cargo check -p servo-script --no-default-features 2>&1 | tail -30
       - name: cargo check obscura-embedder
-        run: cargo check -p obscura-embedder 2>&1 | tail -30
+        run: cargo check -p obscura-embedder 2>&1 | tail -120
       - name: runtime smoke (boot + navigate + screenshot)
         run: |
           cargo build -p obscura-embedder --bin smoke 2>&1 | tail -5
