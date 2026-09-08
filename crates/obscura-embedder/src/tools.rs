@@ -1,6 +1,8 @@
 //! Agent-facing tool semantics over the Servo kernel: navigate, evaluate,
 //! click, screenshot, and structured web search (CN Bing / Baidu).
 
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 use crate::HeadlessServo;
