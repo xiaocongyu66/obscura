@@ -89,7 +89,20 @@ impl HeadlessServo {
     pub fn dispatch_key(&self, event_type: &str, key: &str, code: &str, text: Option<&str>) {
         let kb = keyboard_types::KeyboardEvent {
             key: Key::Character(key.into()),
-            code: keyboard_types::Code::from(code.to_string()),
+            code: match code {
+                "KeyA" => keyboard_types::Code::KeyA,
+                "KeyB" => keyboard_types::Code::KeyB,
+                "Enter" => keyboard_types::Code::Enter,
+                "Backspace" => keyboard_types::Code::Backspace,
+                "Tab" => keyboard_types::Code::Tab,
+                "Space" => keyboard_types::Code::Space,
+                "Escape" => keyboard_types::Code::Escape,
+                "ArrowDown" => keyboard_types::Code::ArrowDown,
+                "ArrowUp" => keyboard_types::Code::ArrowUp,
+                "ArrowLeft" => keyboard_types::Code::ArrowLeft,
+                "ArrowRight" => keyboard_types::Code::ArrowRight,
+                other => code.parse().unwrap_or(keyboard_types::Code::Unknown),
+            },
             state: match event_type {
                 "keyUp" => KeyState::Up,
                 _ => KeyState::Down,
