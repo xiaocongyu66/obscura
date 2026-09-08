@@ -89,7 +89,7 @@ impl HeadlessServo {
     pub fn dispatch_key(&self, event_type: &str, key: &str, code: &str, text: Option<&str>) {
         let kb = keyboard_types::KeyboardEvent {
             key: Key::Character(key.into()),
-            code: code.into(),
+            code: keyboard_types::Code::from(code.to_string()),
             state: match event_type {
                 "keyUp" => KeyState::Up,
                 _ => KeyState::Down,
