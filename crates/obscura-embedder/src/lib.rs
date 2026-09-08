@@ -38,6 +38,24 @@ pub struct HeadlessServo {
     delegate: Rc<HeadlessDelegate>,
 }
 
+/// Registrable-root approximation: last two labels (or three for
+/// co.uk-style suffixes). Good enough for "did the load land" checks.
+fn root_domain(host: &str) -> String {
+    let parts: Vec<&str> = host.trim_end_matches('.').split('.').collect();
+    if parts.len() >= 3 {
+        let two_last = parts[parts.len() - 2..].join(".");
+        let common = ["co.uk", "com.cn", "com.hk", "com.tw", "com.au", "co.jp", "com.br"];
+        if common.iter().any(|s| host.ends_with(*s)) {
+            return parts[parts.len() - 3..].join(".");
+        }
+    }
+    if parts.len() >= 2 {
+        parts[parts.len() - 2..].join(".")
+    } else {
+        host.to_string()
+    }
+}
+
 impl HeadlessServo {
     /// Build a headless Servo instance with a viewport-sized software context.
     pub fn new(viewport: (u32, u32)) -> Result<Self, String> {
@@ -116,8 +134,10 @@ impl HeadlessServo {
                 .webview
                 .url()
                 .map(|cur| {
+                    // Redirects move hosts freely (cn.bing.com →
+                    // www.bing.com), so compare registrable root domains.
                     match (cur.host_str(), target.host_str()) {
-                        (Some(a), Some(b)) => a == b || a.ends_with(b) || b.ends_with(a),
+                        (Some(a), Some(b)) => root_domain(a) == root_domain(b),
                         (None, None) => target.scheme() == cur.scheme(),
                         _ => false,
                     }
