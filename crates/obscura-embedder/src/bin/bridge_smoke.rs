@@ -15,8 +15,8 @@ fn main() {
     assert!(ok, "load completed");
 
     // 0. baseline screenshot BEFORE touching anything: should be red.
-    let pre = servo.screenshot_rgba_blocking(Duration::from_secs(15));
-    println!("pre-eval first-pixel: {:?}", &pre[..8]);
+    let (pw, ph, pre) = servo.screenshot_rgba_blocking(Duration::from_secs(15));
+    println!("pre-eval {pw}x{ph} first-pixel: {:?}", &pre[..8]);
     let pre_red = pre.chunks_exact(4).filter(|p| p[0] > 180 && p[1] < 100).count();
     println!("pre-eval red ratio: {:.3}", pre_red as f64 / (pre.len() / 4) as f64);
 
