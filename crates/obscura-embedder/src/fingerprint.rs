@@ -37,7 +37,7 @@ pub fn random_profile() -> Option<UaProfile> {
             return Some(p);
         }
     }
-    profile_by_index(seed)
+    Some(profile_by_index(seed))
 }
 
 /// Build a profile from an explicit UA string.
