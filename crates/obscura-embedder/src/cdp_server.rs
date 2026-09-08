@@ -107,7 +107,7 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
         .map_err(|e| format!("spawn kernel: {e}"))?;
     // Wait for the kernel to come up (first reply would only come on a
     // command; boot errors surface on the first call instead).
-    Ok(KernelHandle { tx: cmd_tx, rx: reply_rx })
+    Ok(KernelHandle { tx: cmd_tx, rx: reply_rx.into() })
 }
 
 /// Bind the CDP WS server. Returns after the listener is up.
