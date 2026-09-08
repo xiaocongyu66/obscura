@@ -6,6 +6,7 @@
 //! point at a live Servo kernel instead of the legacy obscura-js engine.
 
 pub mod bridge;
+pub mod fingerprint;
 pub mod cdp_server;
 pub mod tools;
 
@@ -59,6 +60,16 @@ fn root_domain(host: &str) -> String {
 impl HeadlessServo {
     /// Build a headless Servo instance with a viewport-sized software context.
     pub fn new(viewport: (u32, u32)) -> Result<Self, String> {
+        Self::new_with_profile(viewport, crate::fingerprint::random_profile())
+    }
+
+    /// Boot with an explicit fingerprint profile: the UA preference carries
+    /// the profile's Chrome UA so the HTTP layer and the JS-visible
+    /// navigator agree.
+    pub fn new_with_profile(
+        viewport: (u32, u32),
+        profile: &'static crate::fingerprint::UaProfile,
+    ) -> Result<Self, String> {
         let size = dpi::PhysicalSize::new(viewport.0, viewport.1);
         let rendering_context = Rc::new(
             SoftwareRenderingContext::new(size).map_err(|e| format!("rendering context: {e:?}"))?,
@@ -71,12 +82,7 @@ impl HeadlessServo {
         servo.setup_logging();
         // Servo's default UA carries a "Servo/" token that anti-bot layers
         // (Bing, Cloudflare) treat as a bot signal. Present a Chrome UA.
-        servo.set_preference(
-            "user_agent",
-            servo::PrefValue::Str(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".into(),
-            ),
-        );
+        servo.set_preference("user_agent", servo::PrefValue::Str(profile.user_agent.clone()));
         let delegate = Rc::new(HeadlessDelegate {
             load_status: RefCell::new(None),
         });
