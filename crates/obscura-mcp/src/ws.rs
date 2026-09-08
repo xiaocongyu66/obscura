@@ -138,8 +138,7 @@ async fn serve_one(
         }
     });
 
-    let mut state = BrowserState::new(proxy, user_agent, stealth);
-    let mut runtime_pump_armed = false;
+    let mut state = BrowserState::new();
 
     while let Some(msg) = ws_receiver.next().await {
         use tokio_tungstenite::tungstenite::protocol::Message;
@@ -180,29 +179,11 @@ async fn serve_one(
             }
             let id = parsed.id.clone().unwrap_or(Value::Null);
             let response = dispatch(&parsed.method, id, &parsed.params, &mut state).await;
-            runtime_pump_armed = state.has_active_page_runtime();
 
-            let mut body = serde_json::to_string(&response)?;
+            let mut body = serde_json::to_string(&response.to_value())?;
             body.push('\n');
             if reply_tx.send(body).await.is_err() {
                 break;
-            }
-        }
-
-        if runtime_pump_armed {
-            match state.advance_active_page_tasks().await {
-                Ok(reached_idle) => runtime_pump_armed = !reached_idle,
-                Err(error) => {
-                    runtime_pump_armed = false;
-                    let err_resp = crate::RpcResponse::err(
-                        Value::Null,
-                        -32000,
-                        format!("page task error: {error}"),
-                    );
-                    if let Ok(body) = serde_json::to_string(&err_resp) {
-                        let _ = reply_tx.send(body).await;
-                    }
-                }
             }
         }
     }
