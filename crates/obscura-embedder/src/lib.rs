@@ -6,6 +6,7 @@
 //! point at a live Servo kernel instead of the legacy obscura-js engine.
 
 pub mod bridge;
+pub mod cdp_server;
 pub mod tools;
 
 use std::cell::RefCell;
@@ -127,7 +128,7 @@ impl HeadlessServo {
 
     /// Blocking screenshot via the official take_screenshot path, pumping
     /// the loop until the callback lands.
-    pub fn screenshot_rgba_blocking(&self, deadline: Duration) -> Vec<u8> {
+    pub fn screenshot_rgba_blocking(&self, deadline: Duration) -> (u32, u32, Vec<u8>) {
         let result: Rc<RefCell<Option<image::RgbaImage>>> = Rc::new(RefCell::new(None));
         let slot = result.clone();
         self.webview().take_screenshot(None, move |res| match res {
@@ -143,7 +144,7 @@ impl HeadlessServo {
             }
             std::thread::sleep(Duration::from_millis(16));
         };
-        img.into_raw()
+        (img.width(), img.height(), img.into_raw())
     }
 
     /// Read the current framebuffer into RGBA bytes (width * height * 4).

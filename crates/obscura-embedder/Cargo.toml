@@ -15,5 +15,11 @@ keyboard-types = "0.8.3"
 log.workspace = true
 image.workspace = true
 
+tokio-tungstenite.workspace = true
+
+futures-util = "0.3"
+
+base64.workspace = true
+
 [features]
 default = []
