@@ -6,6 +6,7 @@
 //! point at a live Servo kernel instead of the legacy obscura-js engine.
 
 pub mod bridge;
+pub mod tools;
 
 use std::cell::RefCell;
 use std::rc::Rc;

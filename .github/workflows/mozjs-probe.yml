@@ -28,6 +28,10 @@ jobs:
         run: |
           cargo build -p obscura-embedder --bin bridge_smoke 2>&1 | tail -5
           RUST_LOG=info ./target/debug/bridge_smoke
+      - name: search smoke (bing extraction)
+        run: |
+          cargo build -p obscura-embedder --bin search_smoke 2>&1 | tail -5
+          RUST_LOG=warn ./target/debug/search_smoke
 
   probe:
     runs-on: ubuntu-24.04-arm
