@@ -127,6 +127,11 @@ impl HeadlessServo {
                 return Ok(true);
             }
             if start.elapsed() > deadline {
+                log::warn!(
+                    "navigate deadline: url={:?} status={:?}",
+                    self.webview.url(),
+                    self.webview.load_status()
+                );
                 return Ok(false);
             }
             std::thread::sleep(Duration::from_millis(8));
