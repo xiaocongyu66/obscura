@@ -85,3 +85,19 @@ pub fn profile_for(version: u32, platform: &str) -> Option<UaProfile> {
         "Mozilla/5.0 ({host}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version}.0.0.0 Safari/537.36"
     ))
 }
+
+/// Deterministic profile by index: cycles Chrome versions × platforms
+/// (index % 12). Used by the standalone serve binary where the session's
+/// profile index is passed on argv.
+pub fn profile_by_index(index: usize) -> UaProfile {
+    const VERSIONS: &[u32] = &[131, 124, 120, 110];
+    const PLATFORMS: &[&str] = &["Linux", "macOS", "Windows"];
+    let version = VERSIONS[index % VERSIONS.len()];
+    let platform = PLATFORMS[(index / VERSIONS.len()) % PLATFORMS.len()];
+    profile_for(version, platform).unwrap_or_else(|| {
+        // 131+ always maps to a TLS-supported version; fallback is safe.
+        from_ua(&format!(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )).expect("fallback profile")
+    })
+}
