@@ -119,6 +119,14 @@ impl HeadlessServo {
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
         let raw = self.evaluate_sync(extraction_js(engine), deadline)?;
+        if raw == "[]" {
+            return Err(format!(
+                "extraction empty; page url={:?} title={:?} body={:?}",
+                self.evaluate_sync("location.href", Duration::from_secs(10)).unwrap_or_default(),
+                self.evaluate_sync("document.title", Duration::from_secs(10)).unwrap_or_default(),
+                self.evaluate_sync("(document.body.innerText||'').slice(0,200)", Duration::from_secs(10)).unwrap_or_default(),
+            ));
+        }
         let parsed: Value = serde_json::from_str(&raw)
             .map_err(|e| format!("extraction parse failed ({raw:.120}): {e}"))?;
         let mut out = Vec::new();
