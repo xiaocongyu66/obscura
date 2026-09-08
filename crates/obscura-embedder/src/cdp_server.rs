@@ -269,5 +269,5 @@ impl MergeOk for Value {
 }
 
 fn error_response(id: i64, message: impl Into<String>) -> Value {
-    json!({ "id": id, "error": { "code": -32601, "message": message } })
+    json!({ "id": id, "error": { "code": -32601, "message": message.into() } })
 }
