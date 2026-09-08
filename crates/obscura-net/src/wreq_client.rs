@@ -179,15 +179,74 @@ pub struct StealthHttpClient {
 }
 
 #[cfg(feature = "stealth")]
+/// Map a Chrome major version to its wreq (boringssl) emulation profile.
+/// Falls back to Chrome 131 — the centre of the UA pool — so a version the
+/// util crate does not profile still gets a coherent fingerprint.
+pub fn wreq_profile_for(chrome_version: u32) -> wreq_util::Profile {
+    use wreq_util::Profile;
+    match chrome_version {
+        110 => Profile::Chrome110,
+        120 => Profile::Chrome120,
+        124 => Profile::Chrome124,
+        126 => Profile::Chrome126,
+        127 => Profile::Chrome127,
+        128 => Profile::Chrome128,
+        129 => Profile::Chrome129,
+        130 => Profile::Chrome130,
+        131 => Profile::Chrome131,
+        132 => Profile::Chrome132,
+        133 => Profile::Chrome133,
+        134 => Profile::Chrome134,
+        135 => Profile::Chrome135,
+        136 => Profile::Chrome136,
+        137 => Profile::Chrome137,
+        138 => Profile::Chrome138,
+        139 => Profile::Chrome139,
+        140 => Profile::Chrome140,
+        141 => Profile::Chrome141,
+        142 => Profile::Chrome142,
+        143 => Profile::Chrome143,
+        144 => Profile::Chrome144,
+        145 => Profile::Chrome145,
+        146 => Profile::Chrome146,
+        147 => Profile::Chrome147,
+        148 => Profile::Chrome148,
+        _ => Profile::Chrome131,
+    }
+}
+
+#[cfg(feature = "stealth")]
+pub fn wreq_platform_for(platform: &str) -> wreq_util::Platform {
+    match platform {
+        "macOS" => wreq_util::Platform::MacOS,
+        "Linux" => wreq_util::Platform::Linux,
+        _ => wreq_util::Platform::Windows,
+    }
+}
+
+#[cfg(feature = "stealth")]
 impl StealthHttpClient {
     pub fn new(cookie_jar: Arc<CookieJar>) -> Self {
         Self::with_proxy(cookie_jar, None)
     }
 
     pub fn with_proxy(cookie_jar: Arc<CookieJar>, proxy_url: Option<&str>) -> Self {
+        Self::with_emulation(cookie_jar, proxy_url, None, None)
+    }
+
+    /// Build the stealth client pinned to a session fingerprint: the UA the
+    /// engine presents and the TLS ClientHello wreq emits must agree, so both
+    /// come from the same [`UaProfile`]. `None` falls back to Chrome 131 /
+    /// Windows.
+    pub fn with_emulation(
+        cookie_jar: Arc<CookieJar>,
+        proxy_url: Option<&str>,
+        chrome_version: Option<u32>,
+        platform: Option<&str>,
+    ) -> Self {
         let emulation_opts = wreq_util::Emulation::builder()
-            .profile(wreq_util::Profile::Chrome145)
-            .platform(wreq_util::Platform::Windows)
+            .profile(wreq_profile_for(chrome_version.unwrap_or(131)))
+            .platform(wreq_platform_for(platform.unwrap_or("Windows")))
             .build();
 
         let mut builder = wreq::Client::builder()

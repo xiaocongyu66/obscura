@@ -14,9 +14,13 @@ pub struct UaProfile {
     pub impersonate: String,
 }
 
-/// Chrome versions with matching TLS profiles (bogdanfinn/tls-client
-/// supports 131/124/120/110).
-const TLS_SUPPORTED_VERSIONS: &[u32] = &[131, 124, 120, 110];
+/// Chrome versions with a matching wreq (boringssl) emulation profile.
+/// Any version outside this set has no TLS profile and must not enter the
+/// pool, or the HTTP layer falls back to a mismatched fingerprint.
+const TLS_SUPPORTED_VERSIONS: &[u32] = &[
+    110, 120, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+    141, 142, 143, 144, 145, 146, 147, 148,
+];
 
 /// Pick a random Chrome UA from the vendored list and derive the coherent
 /// client-hint + TLS profile. Every entry in the pool carries a
@@ -88,7 +92,10 @@ pub fn profile_for(version: u32, platform: &str) -> Option<UaProfile> {
 /// (index % 12). Used by the standalone serve binary where the session's
 /// profile index is passed on argv.
 pub fn profile_by_index(index: usize) -> UaProfile {
-    const VERSIONS: &[u32] = &[131, 124, 120, 110];
+    const VERSIONS: &[u32] = &[
+        110, 120, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139,
+        140, 141, 142, 143, 144, 145, 146, 147, 148,
+    ];
     const PLATFORMS: &[&str] = &["Linux", "macOS", "Windows"];
     let version = VERSIONS[index % VERSIONS.len()];
     let platform = PLATFORMS[(index / VERSIONS.len()) % PLATFORMS.len()];
