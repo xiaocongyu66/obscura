@@ -11,6 +11,7 @@ url.workspace = true
 dpi.workspace = true
 euclid.workspace = true
 keyboard-types = "0.8.3"
+fake_user_agent = "0.2.3"
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true

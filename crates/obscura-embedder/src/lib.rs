@@ -60,7 +60,9 @@ fn root_domain(host: &str) -> String {
 impl HeadlessServo {
     /// Build a headless Servo instance with a viewport-sized software context.
     pub fn new(viewport: (u32, u32)) -> Result<Self, String> {
-        Self::new_with_profile(viewport, crate::fingerprint::random_profile())
+        let profile = crate::fingerprint::random_profile()
+            .ok_or("no TLS-compatible Chrome profile")?;
+        Self::new_with_profile(viewport, profile)
     }
 
     /// Boot with an explicit fingerprint profile: the UA preference carries
@@ -68,7 +70,7 @@ impl HeadlessServo {
     /// navigator agree.
     pub fn new_with_profile(
         viewport: (u32, u32),
-        profile: &'static crate::fingerprint::UaProfile,
+        profile: &crate::fingerprint::UaProfile,
     ) -> Result<Self, String> {
         let size = dpi::PhysicalSize::new(viewport.0, viewport.1);
         let rendering_context = Rc::new(
