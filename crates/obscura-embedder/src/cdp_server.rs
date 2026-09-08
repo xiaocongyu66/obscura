@@ -112,6 +112,10 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
 
 /// Bind the CDP WS server. Returns after the listener is up.
 pub async fn serve(host: &str, port: u16, viewport: (u32, u32)) -> Result<(), String> {
+    // Per-connection kernel: each WS connection is its own isolated
+    // session (own fingerprint profile, own webview, own history). For
+    // stronger isolation (secrets, TLS), spawn one process per session —
+    // the crate ships a --cdp-port mode for that.
     let kernel = Arc::new(spawn_kernel(viewport)?);
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
