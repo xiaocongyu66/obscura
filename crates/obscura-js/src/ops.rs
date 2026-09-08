@@ -1470,7 +1470,7 @@ fn op_dom_inner(shared: SharedState, cmd: String, arg1: String, arg2: String) ->
                     NodeData::Element { name, .. } => {
                         // DOM spec:nodeName = qualified name(prefix:local),
                         // HTML ns 元素 ASCII 大写,其它 ns 原样。
-                        match name.prefix {
+                        match name.prefix.clone() {
                             Some(p) => {
                                 let mut qn = p.as_ref().to_string();
                                 qn.push(':');
@@ -2502,7 +2502,7 @@ async fn op_fetch_url(
     // reaches the network (Fulfill/Fail from the interception channel short-
     // circuit earlier). on_request/on_response previously fired only for
     // navigation; this wires them for JS fetch()/XHR too.
-    if let Some(cbs) = callbacks {
+    if let Some(cbs) = callbacks.as_ref() {
         if cbs.has_request_callbacks().await {
             if let Ok(parsed) = url::Url::parse(&url) {
                 let info = RequestInfo {
@@ -2618,7 +2618,7 @@ async fn op_fetch_url(
 
         let credentials_allowed = credentials.allows(&page_origin, &current_url);
         if credentials_allowed {
-            if let Some(jar) = cookie_jar {
+            if let Some(jar) = cookie_jar.as_ref() {
                 if let Ok(parsed_url) = url::Url::parse(&current_url) {
                     let cookie_header = jar.get_cookie_header(&parsed_url);
                     if !cookie_header.is_empty() {
@@ -2649,23 +2649,23 @@ async fn op_fetch_url(
             req = req.body(current_body.clone());
         }
 
-        if let Some(counter) = in_flight {
+        if let Some(counter) = in_flight.as_ref() {
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         let resp = req.send().await.map_err(|e| {
-            if let Some(counter) = in_flight {
+            if let Some(counter) = in_flight.as_ref() {
                 counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
             deno_error::JsErrorBox::generic(e.to_string())
         })?;
 
-        if let Some(counter) = in_flight {
+        if let Some(counter) = in_flight.as_ref() {
             counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         if credentials_allowed {
-            if let Some(jar) = cookie_jar {
+            if let Some(jar) = cookie_jar.as_ref() {
                 if let Ok(parsed_url) = url::Url::parse(&current_url) {
                     for val in resp.headers().get_all(reqwest::header::SET_COOKIE) {
                         if let Ok(s) = val.to_str() {
@@ -2783,7 +2783,7 @@ async fn op_fetch_url(
         .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?;
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
-    if let Some(cbs) = callbacks {
+    if let Some(cbs) = callbacks.as_ref() {
         if cbs.has_response_callbacks().await {
             let resp = fetch_response(&url, status, resp_headers.clone(), resp_bytes.to_vec());
             let info = RequestInfo {
@@ -3021,7 +3021,7 @@ async fn stealth_fetch_all(
 
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
-    if let Some(cbs) = callbacks {
+    if let Some(cbs) = callbacks.as_ref() {
         if cbs.has_response_callbacks().await {
             let resp = fetch_response(&url, status, resp_headers.clone(), resp_bytes.clone());
             let info = RequestInfo {

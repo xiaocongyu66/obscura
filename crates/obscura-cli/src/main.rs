@@ -542,7 +542,7 @@ async fn main() -> anyhow::Result<()> {
             } else if http {
                 obscura_mcp::http::run(host, port, mcp_proxy, user_agent, stealth).await?;
             } else {
-                obscura_mcp::run(mcp_proxy, user_agent, stealth).await?;
+                obscura_mcp::run().await?;
             }
         }
         None => {
