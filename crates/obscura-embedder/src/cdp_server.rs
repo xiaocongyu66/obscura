@@ -45,13 +45,13 @@ enum KernelReply {
 
 struct KernelHandle {
     tx: Sender<KernelCmd>,
-    rx: Receiver<KernelReply>,
+    rx: std::sync::Mutex<Receiver<KernelReply>>,
 }
 
 impl KernelHandle {
     fn call(&self, cmd: KernelCmd) -> KernelReply {
         self.tx.send(cmd).expect("kernel thread alive");
-        self.rx.recv().expect("kernel replied")
+        self.rx.lock().expect("rx lock").recv().expect("kernel replied")
     }
 }
 
