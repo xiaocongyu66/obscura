@@ -74,6 +74,8 @@ enum KernelCmd {
     DomOp { js: String },
     /// LP.getMarkdown — the shared HTML→markdown script.
     GetMarkdown,
+    StartScreencast { max_width: u32, max_height: u32, every_ms: u64 },
+    StopScreencast,
 }
 
 enum KernelReply {
@@ -137,6 +139,11 @@ struct KernelHandle {
     /// Web resource loads started by the page ("method\u{1f}url") for
     /// Network.requestWillBeSent forwarding.
     request_rx: std::sync::Mutex<Receiver<String>>,
+    /// Page lifecycle events ("frameNavigated\u{1f}url" etc.) for the
+    /// Page.* event family.
+    lifecycle_rx: std::sync::Mutex<Receiver<String>>,
+    /// Screencast frames (base64 JPEG/PNG data) for Page.screencastFrame.
+    frame_rx: std::sync::Mutex<Receiver<String>>,
 }
 
 impl KernelHandle {
@@ -152,15 +159,21 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
     let (reply_tx, reply_rx) = channel::<KernelReply>();
     let (console_tx, console_rx) = channel::<String>();
     let (request_tx, request_rx) = channel::<String>();
+    let (lifecycle_tx, lifecycle_rx) = channel::<String>();
+    let (frame_tx, frame_rx) = channel::<String>();
     std::thread::Builder::new()
         .name("servo-kernel".into())
         .spawn(move || {
             let profile = crate::fingerprint::random_profile()
                 .ok_or_else(|| "no TLS-compatible Chrome profile".to_string());
             let servo = match profile {
-                Ok(profile) => {
-                    HeadlessServo::new_full(viewport, &profile, Some(console_tx), request_tx)
-                },
+                Ok(profile) => HeadlessServo::new_full(
+                    viewport,
+                    &profile,
+                    Some(console_tx),
+                    request_tx,
+                    Some(lifecycle_tx),
+                ),
                 Err(e) => Err(e),
             };
             let servo = match servo {
@@ -170,6 +183,8 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
                     return;
                 },
             };
+            let mut screencast_active: Option<u64> = None;
+            let mut last_frame = std::time::Instant::now();
             for cmd in cmd_rx {
                 let reply = match cmd {
                     KernelCmd::Navigate(url) => {
@@ -272,6 +287,15 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
                         KernelReply::Ok(json!({}))
                     },
                     KernelCmd::SetExtraHeaders => KernelReply::Ok(json!({})),
+                    KernelCmd::StartScreencast { every_ms, .. } => {
+                        screencast_active = Some(every_ms.clamp(100, 2000));
+                        last_frame = std::time::Instant::now();
+                        KernelReply::Ok(json!({}))
+                    },
+                    KernelCmd::StopScreencast => {
+                        screencast_active = None;
+                        KernelReply::Ok(json!({}))
+                    },
                     KernelCmd::Reload => {
                         servo.reload();
                         servo.settle(100);
@@ -315,6 +339,20 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
                     },
                 };
                 let _ = reply_tx.send(reply);
+                // Screencast pacing: after each command, push a frame if the
+                // cast is active and the interval elapsed. Commands drive the
+                // loop, so idle pages only stream while the client is live —
+                // which is exactly when anyone is watching.
+                if let Some(state) = screencast_active {
+                    let elapsed = last_frame.elapsed();
+                    if elapsed >= Duration::from_millis(state) {
+                        let (w, h, rgba) =
+                            servo.screenshot_rgba_blocking(Duration::from_secs(5));
+                        let png = encode_frame_png(&rgba, w, h);
+                        let _ = frame_tx.send(png);
+                        last_frame = std::time::Instant::now();
+                    }
+                }
             }
         })
         .map_err(|e| format!("spawn kernel: {e}"))?;
@@ -325,6 +363,8 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
         rx: reply_rx.into(),
         console_rx: console_rx.into(),
         request_rx: request_rx.into(),
+        lifecycle_rx: lifecycle_rx.into(),
+        frame_rx: frame_rx.into(),
     })
 }
 
@@ -417,6 +457,84 @@ async fn handle_connection(
                     }
                 },
                 Err(_) => break,
+            }
+        }
+        // Forward pending page lifecycle events (Page.* family).
+        loop {
+            let pending = kernel
+                .lifecycle_rx
+                .lock()
+                .expect("lifecycle lock")
+                .try_recv();
+            match pending {
+                Ok(line) => {
+                    let (kind, url) = line
+                        .split_once('\u{1f}')
+                        .unwrap_or(("loadEventFired", ""));
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let event = if kind == "frameNavigated" {
+                        json!({
+                            "method": "Page.frameNavigated",
+                            "params": {
+                                "frame": {
+                                    "id": "servo-frame-1",
+                                    "loaderId": format!("loader-{event_counter}"),
+                                    "url": url,
+                                    "securityOrigin": url,
+                                    "mimeType": "text/html",
+                                },
+                                "type": "Navigation",
+                            }
+                        })
+                    } else {
+                        json!({
+                            "method": format!("Page.{kind}"),
+                            "params": { "timestamp": timestamp }
+                        })
+                    };
+                    let out = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+                    ws.send(tokio_tungstenite::tungstenite::Message::text(out))
+                        .await
+                        .map_err(|e| format!("ws write: {e}"))?;
+                    event_counter += 1;
+                },
+                Err(_) => break,
+            }
+        }
+        // Forward screencast frames (Page.screencastFrame).
+        loop {
+            let pending = kernel.frame_rx.lock().expect("frame lock").try_recv();
+            match pending {
+                Ok(data_b64) if !data_b64.is_empty() => {
+                    let event = json!({
+                        "method": "Page.screencastFrame",
+                        "params": {
+                            "data": data_b64,
+                            "metadata": {
+                                "offsetTop": 0,
+                                "pageScaleFactor": 1,
+                                "deviceWidth": 1280,
+                                "deviceHeight": 800,
+                                "scrollOffsetX": 0,
+                                "scrollOffsetY": 0,
+                                "timestamp": std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs_f64())
+                                    .unwrap_or(0.0),
+                            },
+                            "sessionId": 1,
+                        }
+                    });
+                    let out = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+                    ws.send(tokio_tungstenite::tungstenite::Message::text(out))
+                        .await
+                        .map_err(|e| format!("ws write: {e}"))?;
+                },
+                Err(_) => break,
+                _ => continue,
             }
         }
         // Forward pending resource loads as Network.requestWillBeSent.
@@ -556,6 +674,82 @@ async fn handle_connection(
                 }),
             ),
             "Browser.close" => to_response(id, KernelReply::Ok(json!({})), json!({})),
+            "Page.startScreencast" => {
+                let every_ms = params["everyNthFrame"]
+                    .as_u64()
+                    .map(|n| n * 100)
+                    .unwrap_or(200)
+                    .clamp(100, 2000);
+                reply_to_response(
+                    id,
+                    kernel.call(KernelCmd::StartScreencast {
+                        max_width: params["maxWidth"].as_u64().unwrap_or(1280) as u32,
+                        max_height: params["maxHeight"].as_u64().unwrap_or(800) as u32,
+                        every_ms,
+                    }),
+                )
+            },
+            "Page.stopScreencast" => reply_to_response(id, kernel.call(KernelCmd::StopScreencast)),
+            "Page.captureSnapshot" => {
+                // MHTML capture has no kernel equivalent; the serialized DOM
+                // is the closest lossless artifact we can produce.
+                match kernel.call(KernelCmd::DomOp {
+                    js: "document.documentElement.outerHTML".into(),
+                }) {
+                    KernelReply::Ok(v) => {
+                        let html = v["value"].as_str().unwrap_or("");
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(html.as_bytes());
+                        to_response(id, KernelReply::Ok(json!({})), json!({ "data": b64 }))
+                    },
+                    KernelReply::Err(e) => error_response(id, e),
+                    _ => error_response(id, "unexpected reply"),
+                }
+            },
+            "Input.dispatchTouchEvent" => {
+                // Map a tap to mouse pressed/released at the touch point
+                // (kernel has no touch pipeline; tap ≈ click for challenges).
+                let points = params["touchPoints"].as_array();
+                let (x, y) = match points.and_then(|p| p.last()) {
+                    Some(pt) => (
+                        pt["x"].as_f64().unwrap_or(0.0) as f32,
+                        pt["y"].as_f64().unwrap_or(0.0) as f32,
+                    ),
+                    None => (0.0, 0.0),
+                };
+                let params_json = json!({ "x": x, "y": y });
+                let r1 = kernel.call(KernelCmd::Mouse {
+                    event_type: "mousePressed".into(),
+                    x,
+                    y,
+                });
+                let r2 = kernel.call(KernelCmd::Mouse {
+                    event_type: "mouseReleased".into(),
+                    x,
+                    y,
+                });
+                let _ = params_json;
+                match (r1, r2) {
+                    (KernelReply::Ok(_), KernelReply::Ok(_)) => {
+                        to_response(id, KernelReply::Ok(json!({})), json!({}))
+                    },
+                    (KernelReply::Err(e), _) | (_, KernelReply::Err(e)) => error_response(id, e),
+                    _ => to_response(id, KernelReply::Ok(json!({})), json!({})),
+                }
+            },
+            "Target.getTargetInfo" | "Target.getTargets" => to_response(
+                id,
+                KernelReply::Ok(json!({})),
+                json!({
+                    "targetInfo": {
+                        "targetId": format!("servo-target-{}", std::process::id()),
+                        "type": "page",
+                        "title": "",
+                        "url": "about:blank",
+                        "attached": true,
+                        "browserContextId": "servo-context-1",
+                    }
+                }),
+            ),
             "Page.navigate" => {
                 let url = params["url"].as_str().unwrap_or("about:blank").to_string();
                 match kernel.call(KernelCmd::Navigate(url.clone())) {
@@ -820,6 +1014,19 @@ async fn handle_connection(
     Ok(())
 }
 
+
+fn encode_frame_png(rgba: &[u8], w: u32, h: u32) -> String {
+    if let Some(buf) = image::RgbaImage::from_raw(w, h, rgba.to_vec()) {
+        let mut png = Vec::new();
+        if image::DynamicImage::ImageRgba8(buf)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .is_ok()
+        {
+            return base64::engine::general_purpose::STANDARD.encode(png);
+        }
+    }
+    String::new()
+}
 
 fn reply_to_response(id: i64, reply: KernelReply) -> Value {
     match reply {

@@ -31,6 +31,10 @@ pub struct HeadlessDelegate {
     /// Network.requestWillBeSent feed: one line per web resource the page
     /// starts loading ("method\u{1f}url").
     pub request_tx: Option<std::sync::mpsc::Sender<String>>,
+    /// Page lifecycle feed: one line per event
+    /// ("domContentEventFired\u{1f}" / "loadEventFired\u{1f}" /
+    ///  "frameNavigated\u{1f}<url>" / "urlChanged\u{1f}<url>").
+    pub lifecycle_tx: Option<std::sync::mpsc::Sender<String>>,
 }
 
 impl WebViewDelegate for HeadlessDelegate {
@@ -50,6 +54,12 @@ impl WebViewDelegate for HeadlessDelegate {
         }
     }
 
+    fn notify_url_changed(&self, _webview: servo::WebView, url: Url) {
+        if let Some(tx) = &self.lifecycle_tx {
+            let _ = tx.send(format!("frameNavigated\u{1f}{url}"));
+        }
+    }
+
     fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
         if let Some(tx) = &self.request_tx {
             let req = load.request();
@@ -63,6 +73,21 @@ impl WebViewDelegate for HeadlessDelegate {
     }
 
     fn notify_load_status_changed(&self, _webview: servo::WebView, status: LoadStatus) {
+        if let Some(tx) = &self.lifecycle_tx {
+            match status {
+                LoadStatus::Started => {
+                    let _ = tx.send("frameStartedLoading\u{1f}".to_string());
+                },
+                LoadStatus::HeadParsed => {
+                    let _ = tx.send("domContentEventFired\u{1f}".to_string());
+                },
+                LoadStatus::Complete => {
+                    let _ = tx.send("loadEventFired\u{1f}".to_string());
+                    let _ = tx.send("frameStoppedLoading\u{1f}".to_string());
+                },
+                _ => {},
+            }
+        }
         *self.load_status.borrow_mut() = Some(status);
     }
 }
@@ -131,7 +156,7 @@ impl HeadlessServo {
         console_tx: Option<std::sync::mpsc::Sender<String>>,
     ) -> Result<Self, String> {
         let (request_tx, _request_rx) = std::sync::mpsc::channel::<String>();
-        Self::new_full(viewport, profile, console_tx, request_tx)
+        Self::new_full(viewport, profile, console_tx, request_tx, None)
     }
 
     /// Full-constructor: explicit fingerprint + console/request event
@@ -141,6 +166,7 @@ impl HeadlessServo {
         profile: &crate::fingerprint::UaProfile,
         console_tx: Option<std::sync::mpsc::Sender<String>>,
         request_tx: std::sync::mpsc::Sender<String>,
+        lifecycle_tx: Option<std::sync::mpsc::Sender<String>>,
     ) -> Result<Self, String> {
         let size = dpi::PhysicalSize::new(viewport.0, viewport.1);
         let rendering_context = Rc::new(
@@ -169,6 +195,7 @@ impl HeadlessServo {
             load_status: RefCell::new(None),
             console_tx,
             request_tx: Some(request_tx),
+            lifecycle_tx,
         });
         let user_content_manager = Rc::new(UserContentManager::new(&servo));
         let webview =
