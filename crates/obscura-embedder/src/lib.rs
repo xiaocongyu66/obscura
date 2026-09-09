@@ -223,6 +223,36 @@ impl HeadlessServo {
         true
     }
 
+    /// Reload the current page.
+    pub fn reload(&self) {
+        self.webview.reload();
+    }
+
+    /// Navigate back `amount` steps in this webview's history.
+    pub fn go_back(&self, amount: usize) {
+        self.webview.go_back(amount);
+    }
+
+    /// Navigate forward `amount` steps in this webview's history.
+    pub fn go_forward(&self, amount: usize) {
+        self.webview.go_forward(amount);
+    }
+
+    /// The webview's current URL, if one is loaded.
+    pub fn current_url(&self) -> Option<Url> {
+        self.webview.url()
+    }
+
+    /// The page title as last reported by the kernel.
+    pub fn page_title(&self) -> Option<String> {
+        self.webview.page_title()
+    }
+
+    /// Focus the webview (real focus events for typing pipelines).
+    pub fn focus(&self) {
+        self.webview.focus();
+    }
+
     /// Pump the event loop for `millis` so setTimeout chains (gesture
     /// replays, typing sequences) make progress.
     pub fn settle(&self, millis: u64) {

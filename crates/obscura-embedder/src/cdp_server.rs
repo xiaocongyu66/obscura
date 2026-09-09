@@ -61,6 +61,19 @@ enum KernelCmd {
     /// Extra request headers (stored; applied once the kernel supports
     /// request-side header overrides — acknowledged so clients don't stall).
     SetExtraHeaders,
+    Reload,
+    GoBack(usize),
+    GoForward(usize),
+    /// Run a function declaration against an object/execution context.
+    CallFunctionOn { expression: String },
+    /// Register a CDP binding: window.<name> callable from page, delivered
+    /// as Runtime.bindingCalled events (JS bridge injected per document).
+    AddBinding { name: String, script: String },
+    RemoveBinding { name: String },
+    /// DOM.* operations implemented as page-side JS.
+    DomOp { js: String },
+    /// LP.getMarkdown — the shared HTML→markdown script.
+    GetMarkdown,
 }
 
 enum KernelReply {
@@ -259,6 +272,47 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
                         KernelReply::Ok(json!({}))
                     },
                     KernelCmd::SetExtraHeaders => KernelReply::Ok(json!({})),
+                    KernelCmd::Reload => {
+                        servo.reload();
+                        servo.settle(100);
+                        KernelReply::Ok(json!({}))
+                    },
+                    KernelCmd::GoBack(amount) => {
+                        servo.go_back(amount);
+                        KernelReply::Ok(json!({}))
+                    },
+                    KernelCmd::GoForward(amount) => {
+                        servo.go_forward(amount);
+                        KernelReply::Ok(json!({}))
+                    },
+                    KernelCmd::CallFunctionOn { expression } => {
+                        match servo.evaluate_sync(&expression, Duration::from_secs(30)) {
+                            Ok(v) => KernelReply::Ok(json!({ "result": { "type": "string", "value": v } })),
+                            Err(e) => KernelReply::Err(e),
+                        }
+                    },
+                    KernelCmd::AddBinding { name, script } => {
+                        servo.add_initialization_script(&script);
+                        KernelReply::Ok(json!({ "name": name }))
+                    },
+                    KernelCmd::RemoveBinding { name } => {
+                        // The binding's JS bridge stays until the next
+                        // document; clients treat removal as eventual.
+                        log::debug!("binding {name} removal is eventual (kernel user scripts are additive)");
+                        KernelReply::Ok(json!({}))
+                    },
+                    KernelCmd::DomOp { js } => {
+                        match servo.evaluate_sync(&js, Duration::from_secs(15)) {
+                            Ok(v) => KernelReply::Ok(json!({ "value": v })),
+                            Err(e) => KernelReply::Err(e),
+                        }
+                    },
+                    KernelCmd::GetMarkdown => {
+                        match servo.evaluate_sync(crate::page_dumps::HTML_TO_MARKDOWN_JS, Duration::from_secs(30)) {
+                            Ok(md) => KernelReply::Ok(json!({ "markdown": md })),
+                            Err(e) => KernelReply::Err(e),
+                        }
+                    },
                 };
                 let _ = reply_tx.send(reply);
             }
@@ -435,8 +489,73 @@ async fn handle_connection(
             },
             "Target.attachToTarget" => to_response(id, KernelReply::Ok(json!({})), json!({ "sessionId": session_id })),
             "Runtime.enable" | "Page.enable" | "Runtime.disable" | "Page.disable" => {
+                // Synthetic session context: the flattened session gets one
+                // execution context up front (Puppeteer waits for it).
+                if method == "Runtime.enable" {
+                    let event = json!({
+                        "method": "Runtime.executionContextCreated",
+                        "params": {
+                            "context": {
+                                "id": 1,
+                                "origin": "about:blank",
+                                "name": "servo-main",
+                                "isDefault": true,
+                            }
+                        }
+                    });
+                    let out = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+                    ws.send(tokio_tungstenite::tungstenite::Message::text(out))
+                        .await
+                        .map_err(|e| format!("ws write: {e}"))?;
+                }
                 to_response(id, KernelReply::Ok(json!({})), json!({}))
             },
+            "Emulation.setDeviceMetricsOverride" | "Emulation.clearDeviceMetricsOverride"
+            | "Emulation.setDefaultBackgroundColorOverride" | "Emulation.setTouchEmulationEnabled"
+            | "Emulation.setFocusEmulationEnabled" => {
+                // Viewport stays at the boot size (1280x800); acknowledge so
+                // clients proceed. Kernel-side resize lands with a live
+                // SoftwareRenderingContext swap.
+                to_response(id, KernelReply::Ok(json!({})), json!({}))
+            },
+            "Storage.getCookies" => reply_to_response(id, kernel.call(KernelCmd::GetCookies)),
+            "Storage.setCookies" => {
+                let mut last = json!({ "id": id, "result": {} });
+                if let Some(cookies) = params["cookies"].as_array() {
+                    for c in cookies {
+                        let (name, domain) = (
+                            c["name"].as_str().unwrap_or(""),
+                            c["domain"].as_str().unwrap_or(""),
+                        );
+                        if name.is_empty() || domain.is_empty() {
+                            continue;
+                        }
+                        let mut cookie_string =
+                            format!("{}={}; Domain={}", name, c["value"].as_str().unwrap_or(""), domain);
+                        if let Some(path) = c["path"].as_str() {
+                            cookie_string.push_str(&format!("; Path={path}"));
+                        }
+                        last = reply_to_response(id, kernel.call(KernelCmd::SetCookie(cookie_string)));
+                    }
+                }
+                last
+            },
+            "Storage.clearDataForOrigin" | "Storage.clearCookies" => {
+                // Jar-wide clearing lands with SiteDataManager clear hooks.
+                to_response(id, KernelReply::Ok(json!({})), json!({}))
+            },
+            "Browser.getVersion" => to_response(
+                id,
+                KernelReply::Ok(json!({})),
+                json!({
+                    "Browser": "Servo/obscura",
+                    "protocolVersion": "1.3",
+                    "userAgent": crate::fingerprint::random_profile()
+                        .map(|p| p.user_agent)
+                        .unwrap_or_else(|| "Mozilla/5.0".into()),
+                }),
+            ),
+            "Browser.close" => to_response(id, KernelReply::Ok(json!({})), json!({})),
             "Page.navigate" => {
                 let url = params["url"].as_str().unwrap_or("about:blank").to_string();
                 match kernel.call(KernelCmd::Navigate(url.clone())) {
@@ -514,6 +633,97 @@ async fn handle_connection(
                         .to_string(),
                     clear: params["clear"].as_bool().unwrap_or(false),
                 }))
+            },
+            "Page.reload" => reply_to_response(id, kernel.call(KernelCmd::Reload)),
+            "Page.navigateToHistoryEntry" => {
+                // CDP sends an entryId; we accept a numeric delta instead —
+                // the Go client passes -1/+1 for back/forward.
+                let entry = params["entryId"].as_i64().unwrap_or(0);
+                let reply = if entry < 0 {
+                    kernel.call(KernelCmd::GoBack((-entry) as usize))
+                } else if entry > 0 {
+                    kernel.call(KernelCmd::GoForward(entry as usize))
+                } else {
+                    KernelReply::Ok(json!({}))
+                };
+                reply_to_response(id, reply)
+            },
+            "Runtime.callFunctionOn" => {
+                let expression = params["functionDeclaration"]
+                    .as_str()
+                    .or_else(|| params["expression"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                reply_to_response(id, kernel.call(KernelCmd::CallFunctionOn { expression }))
+            },
+            "Runtime.addBinding" => {
+                let name = params["name"].as_str().unwrap_or("").to_string();
+                if name.is_empty() {
+                    error_response(id, "addBinding: name required")
+                } else {
+                    // window.<name> posts the payload back through console
+                    // (binding bridge lands with kernel bidirectional hooks).
+                    let script = format!(
+                        "(function(){{\
+                            window.{name} = function(payload) {{\
+                                try {{ console.info('__obscura_binding__:{name}:' + (typeof payload === 'string' ? payload : JSON.stringify(payload))); }} catch(e) {{}}\
+                            }};\
+                        }})()"
+                    );
+                    reply_to_response(id, kernel.call(KernelCmd::AddBinding { name, script }))
+                }
+            },
+            "Runtime.removeBinding" => {
+                let name = params["name"].as_str().unwrap_or("").to_string();
+                reply_to_response(id, kernel.call(KernelCmd::RemoveBinding { name }))
+            },
+            "LP.getMarkdown" => reply_to_response(id, kernel.call(KernelCmd::GetMarkdown)),
+            // DOM.* via page-side JS against the live kernel DOM.
+            "DOM.focus" => {
+                let js = match (&params["nodeId"], &params["selector"]) {
+                    (node, _) if node.is_u64() => format!(
+                        "(function(){{var els=document.querySelectorAll('*');var el=els[{}];if(el&&el.focus)el.focus();return !!el;}})()",
+                        node.as_u64().unwrap_or(0).saturating_sub(1)
+                    ),
+                    (_, sel) if sel.is_str() => format!(
+                        "(function(){{var el=document.querySelector({});if(el&&el.focus)el.focus();return !!el;}})()",
+                        serde_json::to_string(sel.as_str().unwrap_or("body")).unwrap_or_default()
+                    ),
+                    _ => "(function(){var el=document.activeElement||document.body;if(el&&el.focus)el.focus();return true;})()".to_string(),
+                };
+                reply_to_response(id, kernel.call(KernelCmd::DomOp { js }))
+            },
+            "DOM.setAttributeValue" => {
+                let selector = params["selector"].as_str().unwrap_or("body");
+                let name = params["name"].as_str().unwrap_or("");
+                let value = params["value"].as_str().unwrap_or("");
+                if name.is_empty() {
+                    error_response(id, "setAttributeValue: name required")
+                } else {
+                    let js = format!(
+                        "(function(){{var el=document.querySelector({});if(!el)return false;el.setAttribute({},{});return true;}})()",
+                        serde_json::to_string(selector).unwrap_or_default(),
+                        serde_json::to_string(name).unwrap_or_default(),
+                        serde_json::to_string(value).unwrap_or_default(),
+                    );
+                    reply_to_response(id, kernel.call(KernelCmd::DomOp { js }))
+                }
+            },
+            "DOM.removeNode" => {
+                let selector = params["selector"].as_str().unwrap_or("");
+                if selector.is_empty() {
+                    error_response(id, "removeNode: selector required")
+                } else {
+                    let js = format!(
+                        "(function(){{var el=document.querySelector({});if(!el)return false;el.remove();return true;}})()",
+                        serde_json::to_string(selector).unwrap_or_default(),
+                    );
+                    reply_to_response(id, kernel.call(KernelCmd::DomOp { js }))
+                }
+            },
+            "DOM.setFileInputFiles" => {
+                // Kernel-side file input population is not available yet.
+                error_response(id, "DOM.setFileInputFiles: not supported by the Servo kernel yet")
             },
             "Page.addScriptToEvaluateOnNewDocument" => {
                 let source = params["source"]
