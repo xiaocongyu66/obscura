@@ -1,17 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/obscura-dom",
     "crates/obscura-net",
-    "crates/obscura-browser",
-    "crates/obscura-cdp",
-    "crates/obscura-js",
     "crates/obscura-mcp",
-    "crates/obscura-render",
-    "crates/obscura-webgl",
     "crates/obscura-embedder",
     "crates/obscura-cli",
-    "crates/obscura",
     "servo/components/script",
     "servo/components/script_bindings",
     "servo/components/shared/base",
@@ -65,14 +58,9 @@ rust-version = "1.88.0"
 
 
 [workspace.dependencies]
-obscura-dom = { path = "crates/obscura-dom" }
 obscura-net = { path = "crates/obscura-net" }
-obscura-browser = { path = "crates/obscura-browser" }
-obscura-cdp = { path = "crates/obscura-cdp" }
-obscura-js = { path = "crates/obscura-js" }
 obscura-mcp = { path = "crates/obscura-mcp" }
-obscura-render = { path = "crates/obscura-render" }
-obscura-webgl = { path = "crates/obscura-webgl" }
+obscura-embedder = { path = "crates/obscura-embedder" }
 
 html5ever = "0.39"
 markup5ever = "0.39"
@@ -80,12 +68,8 @@ xml5ever = "0.39"
 selectors = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f30125e27a8fb897a709c5e" }
 servo_arc = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f30125e27a8fb897a709c5e" }
 cssparser = { version = "0.37", features = ["serde"] }
-# Layout engine for the optional render layer (obscura-render). Pure Rust.
+# Layout engine (servo layout). Pure Rust.
 taffy = { version = "0.14.0", default-features = false, features = ["calc", "detailed_layout_info", "grid", "std"] }
-# CPU-only pure-Rust 2D rasterizer for the render layer's paint step.
-tiny-skia = "0.12"
-# Pure-Rust glyph rasterizer for the render layer's text step.
-ab_glyph = "0.2"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.26"
 # No "cookies" feature: obscura manages cookies through its own CookieJar
@@ -427,13 +411,6 @@ xpath = { package = "servo-xpath", path = "servo/components/xpath" }
 # Local fix: btls-sys prefix_symbols applies objcopy per archive member
 # (archive-wide objcopy --redefine-syms is a silent no-op on CI).
 btls-sys = { path = "crates/btls-sys-patch" }
-# Carry the same canonical variable-font coordinates through shaping and
-# rasterization until the upstream API exposes them.
-cosmic-text = { path = "vendor/cosmic-text" }
 
-# Unwinding (the Rust default) is REQUIRED for the anti-panic protocol: ops wrap
-# their bodies in std::panic::catch_unwind so a panic degrades to an error return
-# instead of unwinding into V8's FFI frame and aborting the process. panic="abort"
-# would turn every catchable op panic into a hard crash.
 [profile.release]
 panic = "unwind"

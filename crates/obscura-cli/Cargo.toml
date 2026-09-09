@@ -9,22 +9,14 @@ repository.workspace = true
 name = "obscura"
 path = "src/main.rs"
 
-[[bin]]
-name = "obscura-worker"
-path = "src/worker.rs"
-
 [features]
 default = []
-stealth = ["obscura-browser/stealth", "obscura-net/stealth"]
-render = ["obscura-browser/render", "obscura-cdp/render"]
+stealth = ["obscura-net/stealth"]
 
 [dependencies]
-obscura-browser = { workspace = true }
+obscura-embedder = { workspace = true }
 obscura-mcp = { workspace = true }
-obscura-cdp = { workspace = true }
-obscura-dom = { workspace = true }
 obscura-net = { workspace = true }
-obscura-js = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

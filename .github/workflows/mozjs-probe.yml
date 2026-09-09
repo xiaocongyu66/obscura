@@ -20,6 +20,8 @@ jobs:
         run: cargo check -p servo-script --no-default-features --message-format=short 2>&1 | tail -30
       - name: cargo check obscura-embedder
         run: cargo check -p obscura-embedder --message-format=short 2>&1 | tail -120
+      - name: cargo check obscura-cli (self-engine removal)
+        run: cargo check -p obscura-cli --message-format=short 2>&1 | tail -120
       - name: runtime smoke (boot + navigate + screenshot)
         run: |
           cargo build -p obscura-embedder --bin smoke 2>&1 | tail -5

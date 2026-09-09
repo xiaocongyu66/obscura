@@ -6,9 +6,11 @@
 //! point at a live Servo kernel instead of the legacy obscura-js engine.
 
 pub mod bridge;
+pub mod fetch;
 pub mod fingerprint;
 mod user_agents;
 pub mod cdp_server;
+pub mod page_dumps;
 pub mod tools;
 
 use std::cell::RefCell;

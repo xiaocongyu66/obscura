@@ -145,16 +145,16 @@ jobs:
           save-if: false
 
       - name: Build render release
-        run: cargo build --release -p obscura-cli --bins --features render
+        run: cargo build --release -p obscura-cli --bins
 
       - name: Test render configuration
-        run: cargo nextest run --release --features render --no-fail-fast
+        run: cargo nextest run --release --no-fail-fast
 
       - name: Stage candidate binary for comparison
         run: install -D -m 0755 target/release/obscura "$RUNNER_TEMP/obscura-ci/obscura-pr"
 
       - name: Build render and stealth release
-        run: cargo build --release -p obscura-cli --bins --features render,stealth
+        run: cargo build --release -p obscura-cli --bins --features stealth
 
       - name: Test the stealth transport
         run: |
@@ -171,17 +171,10 @@ jobs:
 
       - name: Test no-render configuration
         run: |
-          # `obscura` uses its default `api` feature for the public library; an
-          # empty feature set is not a supported crate configuration. Test that
-          # no-render API normally and every non-render crate with defaults
-          # disabled. `obscura-render` has paint-only test fixtures, so verify
-          # its feature-minimal library separately without compiling those
-          # fixtures.
-          cargo nextest run --release -p obscura --no-fail-fast
-          cargo nextest run --release --workspace --exclude obscura \
-            --exclude obscura-render \
+          # Test every crate with defaults disabled (no self-engine crates
+          # remain; the workspace is the Servo kernel + thin shells).
+          cargo nextest run --release --workspace \
             --no-default-features --no-fail-fast
-          cargo check --release -p obscura-render --no-default-features
 
       - name: Build no-render and stealth release
         run: cargo build --release -p obscura-cli --bins --no-default-features --features stealth
@@ -253,7 +246,7 @@ jobs:
           (
             cd "$base_root"
             CARGO_TARGET_DIR="$RUNNER_TEMP/obscura-base-target" \
-              cargo build --release -p obscura-cli --bins --features render
+              cargo build --release -p obscura-cli --bins
           )
           install -D -m 0755 \
             "$RUNNER_TEMP/obscura-base-target/release/obscura" \

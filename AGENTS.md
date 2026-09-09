@@ -78,20 +78,12 @@ edit instead.
 
 ## Architecture
 
-- **obscura-cli** — CLI: `fetch` (`--dump assets|html|text|links|markdown|original|cookies`, `--eval <JS>`, `--screenshot <PNG>`), `serve` (CDP server), `scrape`, `mcp`. `--proxy`, `--stealth`, and `--allow-private-network` are global flags: valid before or after the subcommand and applied to `fetch`, `serve`, `scrape`, and `mcp` (a `scrape` run forwards `--stealth` to each worker via `OBSCURA_STEALTH`).
-- **obscura-cdp** — Chrome DevTools Protocol server (WebSocket). Managed page
-  sessions use `"{targetId}-session"`; explicit flattened attachments receive
-  distinct session ids so Playwright and Puppeteer can open raw page sessions.
-- **obscura-js** — V8/`deno_core` runtime. `js/bootstrap.js` is the DOM/browser shim; `src/ops.rs` bridges JS to Rust DOM ops; `src/runtime.rs` owns the isolate and the per-page `ObscuraState`.
-- **obscura-dom** — DOM tree (`src/tree.rs`).
-- **obscura-net** — HTTP client (`client.rs`), stealth client (`wreq_client.rs`), cookie jar, robots cache, tracker blocklist.
-- **obscura-browser** — the `Page` type, navigation, JS evaluation.
-- **obscura-render** — selector cascade, computed style, retained layout,
-  scrolling, text shaping, images/SVG/canvas, and CPU-backed paint. The
-  `render` feature powers geometry, screenshots, CDP screencasting, and PDF.
-- **obscura-mcp** — stateful MCP automation tools. Render builds expose
-  `browser_screenshot` and `browser_pdf`; streaming screencasts remain CDP-only.
-- **obscura** — embeddable Rust library API (git dependency; builds V8 locally, not on crates.io). Public request-interception API on `Page`: `add_preload_script`, `enable_interception` (channel of `InterceptedRequest`, resolved with `InterceptResolution::{Continue, Fulfill, Fail}`), and passive `on_request` / `on_response`. `op_fetch_url` invokes these for JS `fetch()`/XHR, so when touching it keep a `Continue` URL rewrite behind `validate_fetch_url` (the SSRF gate, same as redirects).
+- **obscura-cli** — CLI: `fetch` (`--dump html|text|links|markdown|original|assets|cookies`, `--eval <JS>`, `--screenshot <PNG>`, `--file` batch), `scrape` (parallel rendered fetch), `serve` (CDP server over the kernel), `mcp`. `--proxy` and `--stealth` are global flags. Raw HTTP paths use obscura-net; everything rendered rides the Servo kernel via obscura-embedder.
+- **obscura-embedder** — the Servo-kernel host: headless boot (HeadlessServo), CDP-compatible WS server (`cdp_server.rs`, `serve` binary), evaluate + real input bridge, fingerprint profiles (UA pool + Chrome TLS), search (CN Bing/Baidu), and the CLI dump surface (`page_dumps.rs`, `fetch.rs`).
+- **obscura-mcp** — stateful MCP automation tools; each session is an isolated `obscura-embedder-serve` child (own UA/TLS/cookies/history). Transports: stdio, WebSocket, HTTP.
+- **obscura-net** — HTTP client (`client.rs`), stealth client (`wreq_client.rs`), cookie jar, robots cache, tracker blocklist. Independent of the kernel; backs the CLI raw paths.
+- **btls-sys-patch** — local btls-sys fix (per-member objcopy redefine) enabling the BoringSSL/Chrome-TLS network stack.
+- **servo/** — vendored Servo engine (script/mozjs, layout/stylo, net/btls, constellation, webgl): THE browser kernel. Do not treat it as a dependency to vendor away; it is the product.
 
 ## Conventions
 
