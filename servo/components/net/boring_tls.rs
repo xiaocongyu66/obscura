@@ -19,8 +19,11 @@
 use std::future;
 use std::pin::Pin;
 use btls::error::ErrorStack;
-use btls::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion, CertificateCompressionAlgorithm};
-use btls::x509::{X509, X509StoreBuilder};
+use btls::ssl::{
+    CertificateCompressionAlgorithm, SslConnector, SslMethod, SslRef, SslVerifyMode, SslVersion,
+};
+use btls::x509::store::X509StoreBuilder;
+use btls::x509::X509;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_btls::SslStream;
 
@@ -39,8 +42,8 @@ impl btls::ssl::CertificateCompressor for BrotliTlsCompressor {
 
     fn compress<W: std::io::Write>(&self, input: &[u8], output: &mut W) -> std::io::Result<()> {
         let mut writer = brotli::CompressorWriter::new(output, input.len(), 11, 32);
-        writer.write_all(input)?;
-        writer.flush()
+        std::io::Write::write_all(&mut writer, input)?;
+        std::io::Write::flush(&mut writer)
     }
 
     fn decompress<W: std::io::Write>(&self, input: &[u8], output: &mut W) -> std::io::Result<()> {
@@ -59,26 +62,23 @@ pub struct ChromeTlsConfig {
     pub override_manager: CertificateErrorOverrideManager,
 }
 
-impl ChromeTlsConfig {
-    /// Connection-level fingerprint pieces. Chrome toggles ECH grease and
-    /// ALPS per connection (they live on the SSL object, not the context).
-    fn apply_connection_settings(
-        ssl: &mut btls::ssl::SslRef,
-        profile: ChromeTlsProfile,
-        alpn_mode: AlpnMode,
-    ) {
-        if profile.enable_ech_grease {
-            ssl.set_enable_ech_grease(true);
+/// Connection-level fingerprint pieces. BoringSSL keeps ECH grease and
+/// ALPS on the SSL object rather than the context, so they are applied
+/// per handshake in `connect_tls`.
+fn apply_connection_settings(
+    ssl: &mut SslRef,
+    profile: ChromeTlsProfile,
+    alpn_mode: AlpnMode,
+) {
+    if profile.enable_ech_grease {
+        ssl.set_enable_ech_grease(true);
+    }
+    if alpn_mode == AlpnMode::Browser {
+        if profile.alps_use_new_codepoint {
+            ssl.set_alps_use_new_codepoint(true);
         }
-        if alpn_mode == AlpnMode::Browser {
-            if profile.alps_use_new_codepoint {
-                ssl.set_alps_use_new_codepoint(true);
-            }
-            // The context advertises ALPS for h2 already; this refreshes the
-            // application settings so mid-session store swaps stay coherent.
-            if let Err(error) = ssl.add_application_settings(b"h2") {
-                log::debug!("ALPS not advertised: {error:?}");
-            }
+        if let Err(error) = ssl.add_application_settings(b"h2") {
+            log::debug!("ALPS not advertised: {error:?}");
         }
     }
 }
@@ -127,11 +127,6 @@ pub fn build_ssl_connector_for(
         AlpnMode::Browser => {
             // ALPN: h2 preferred, HTTP/1.1 fallback (hyper negotiates from here).
             builder.set_alpn_protos(b"\x02h2\x08http/1.1")?;
-            // ALPS: advertise HTTP/2 settings in the handshake like Chrome does.
-            builder.add_application_settings(b"h2")?;
-            if profile.alps_use_new_codepoint {
-                builder.set_alps_use_new_codepoint(true);
-            }
         },
         AlpnMode::Http1Only => {
             builder.set_alpn_protos(b"\x08http/1.1")?;
@@ -212,7 +207,7 @@ where
         .into_ssl(host)
         .map_err(|e| format!("TLS setup for {host}: {e:?}"))?;
 
-    ChromeTlsConfig::apply_connection_settings(&mut ssl, profile, alpn_mode);
+    apply_connection_settings(&mut ssl, profile, alpn_mode);
 
     let mut stream = SslStream::new(ssl, tcp).map_err(|e| format!("TLS stream: {e:?}"))?;
     let mut pinned = Pin::new(&mut stream);

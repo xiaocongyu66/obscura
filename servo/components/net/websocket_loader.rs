@@ -204,6 +204,60 @@ fn setup_dom_listener(
     receiver
 }
 
+/// The WS transport stream: plain TCP for `ws`, a btls-wrapped stream for
+/// `wss`. Exists so both branches of the connection hand async-tungstenite
+/// the same concrete type.
+enum WsStream {
+    Plain(tokio::net::TcpStream),
+    Tls(tokio_btls::SslStream<tokio::net::TcpStream>),
+}
+
+impl tokio::io::AsyncRead for WsStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            WsStream::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            WsStream::Tls(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for WsStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            WsStream::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            WsStream::Tls(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            WsStream::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            WsStream::Tls(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            WsStream::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            WsStream::Tls(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
 /// Listen for WS events from the DOM and the network until one side
 /// closes the connection or an error occurs. Since this is an async
 /// function that uses the select operation, it will run as a task
@@ -213,7 +267,10 @@ async fn run_ws_loop<S>(
     resource_event_sender: IpcSender<WebSocketNetworkEvent>,
     mut stream: WebSocketStream<S>,
 ) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    // async-tungstenite drives the inner tungstenite socket through
+    // futures-io traits; its tokio entry point wraps the socket in
+    // TokioAdapter for us, so the established-stream generic lands here.
+    S: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin,
 {
     loop {
         select! {
@@ -354,9 +411,9 @@ pub(crate) async fn start_websocket(
     // as HTTP: we do the TLS handshake here and hand the established
     // stream to async-tungstenite's plain-text entry point. wss requests
     // then present the identical ClientHello as page navigation.
-    let (stream, response) = if url.scheme() == "https" {
+    let ws_stream: WsStream = if url.scheme() == "https" {
         let connector = boring_tls::build_ssl_connector(&tls_config)
-            .map_err(|e| Error::Io(io::Error::other(format!("TLS context: {e:?}"))))?;
+            .map_err(|e| Error::Io(std::io::Error::other(format!("TLS context: {e:?}"))))?;
         let tls_stream = boring_tls::connect_tls(
             &connector,
             &host,
@@ -365,11 +422,12 @@ pub(crate) async fn start_websocket(
             boring_tls::AlpnMode::Http1Only,
         )
         .await
-        .map_err(|e| Error::Io(io::Error::other(e)))?;
-        client_async_with_config(builder, tls_stream, None).await?
+        .map_err(|e| Error::Io(std::io::Error::other(e)))?;
+        WsStream::Tls(tls_stream)
     } else {
-        client_async_with_config(builder, socket, None).await?
+        WsStream::Plain(socket)
     };
+    let (stream, response) = client_async_with_config(builder, ws_stream, None).await?;
 
     let protocol_in_use = process_ws_response(&http_state, &response, &url, protocols)?;
 

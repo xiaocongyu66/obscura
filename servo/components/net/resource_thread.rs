@@ -140,7 +140,7 @@ pub fn new_core_resource_thread(
     mem_profiler_chan: MemProfilerChan,
     embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
     config_dir: Option<PathBuf>,
-    ca_certificates: CACertificates<'static>,
+    ca_certificates: CACertificates,
     ignore_certificate_errors: bool,
     protocols: Arc<ProtocolRegistry>,
 ) -> (CoreResourceThread, CoreResourceThread) {
@@ -199,7 +199,7 @@ pub fn new_core_resource_thread(
 struct ResourceChannelManager {
     resource_manager: CoreResourceManager,
     config_dir: Option<PathBuf>,
-    ca_certificates: CACertificates<'static>,
+    ca_certificates: CACertificates,
     ignore_certificate_errors: bool,
     cancellation_listeners: FxHashMap<RequestId, Weak<CancellationListener>>,
     cookie_listeners: FxHashMap<CookieStoreId, GenericCallback<CookieAsyncResponse>>,
@@ -208,7 +208,7 @@ struct ResourceChannelManager {
 /// This returns a tuple HttpState and a private HttpState.
 fn create_http_states(
     config_dir: Option<&Path>,
-    ca_certificates: CACertificates<'static>,
+    ca_certificates: CACertificates,
     ignore_certificate_errors: bool,
     embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
 ) -> (Arc<HttpState>, Arc<HttpState>) {
@@ -718,7 +718,7 @@ pub struct CoreResourceManager {
     sw_managers: HashMap<ImmutableOrigin, IpcSender<CustomResponseMediator>>,
     filemanager: FileManager,
     request_interceptor: RequestInterceptor,
-    ca_certificates: CACertificates<'static>,
+    ca_certificates: CACertificates,
     ignore_certificate_errors: bool,
     preloaded_resources: SharedPreloadedResources,
     /// <https://fetch.spec.whatwg.org/#concept-fetch-record>
@@ -730,7 +730,7 @@ impl CoreResourceManager {
         devtools_sender: Option<Sender<DevtoolsControlMsg>>,
         _profiler_chan: ProfilerChan,
         embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
-        ca_certificates: CACertificates<'static>,
+        ca_certificates: CACertificates,
         ignore_certificate_errors: bool,
         blob_token_communicator: Arc<Mutex<BlobTokenCommunicator>>,
     ) -> CoreResourceManager {

@@ -165,9 +165,15 @@ where
         cx: &mut Context<'_>,
         buf: hyper::rt::ReadBufCursor<'_>,
     ) -> Poll<Result<(), io::Error>> {
+        // TokioIo implements both tokio's and hyper's Read; the hyper
+        // signature (ReadBufCursor) is the one hyper's client expects.
         match self.get_mut() {
-            MaybeHttpsStream::Plain(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
-            MaybeHttpsStream::Https(tls) => std::pin::Pin::new(tls).poll_read(cx, buf),
+            MaybeHttpsStream::Plain(stream) => {
+                hyper::rt::Read::poll_read(std::pin::Pin::new(stream), cx, buf)
+            },
+            MaybeHttpsStream::Https(tls) => {
+                hyper::rt::Read::poll_read(std::pin::Pin::new(tls), cx, buf)
+            },
         }
     }
 }
@@ -183,8 +189,12 @@ where
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
         match self.get_mut() {
-            MaybeHttpsStream::Plain(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
-            MaybeHttpsStream::Https(tls) => std::pin::Pin::new(tls).poll_write(cx, buf),
+            MaybeHttpsStream::Plain(stream) => {
+                hyper::rt::Write::poll_write(std::pin::Pin::new(stream), cx, buf)
+            },
+            MaybeHttpsStream::Https(tls) => {
+                hyper::rt::Write::poll_write(std::pin::Pin::new(tls), cx, buf)
+            },
         }
     }
 
@@ -193,8 +203,12 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), io::Error>> {
         match self.get_mut() {
-            MaybeHttpsStream::Plain(stream) => std::pin::Pin::new(stream).poll_flush(cx),
-            MaybeHttpsStream::Https(tls) => std::pin::Pin::new(tls).poll_flush(cx),
+            MaybeHttpsStream::Plain(stream) => {
+                hyper::rt::Write::poll_flush(std::pin::Pin::new(stream), cx)
+            },
+            MaybeHttpsStream::Https(tls) => {
+                hyper::rt::Write::poll_flush(std::pin::Pin::new(tls), cx)
+            },
         }
     }
 
@@ -203,8 +217,12 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), io::Error>> {
         match self.get_mut() {
-            MaybeHttpsStream::Plain(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
-            MaybeHttpsStream::Https(tls) => std::pin::Pin::new(tls).poll_shutdown(cx),
+            MaybeHttpsStream::Plain(stream) => {
+                hyper::rt::Write::poll_shutdown(std::pin::Pin::new(stream), cx)
+            },
+            MaybeHttpsStream::Https(tls) => {
+                hyper::rt::Write::poll_shutdown(std::pin::Pin::new(tls), cx)
+            },
         }
     }
 
@@ -222,9 +240,11 @@ where
     ) -> Poll<Result<usize, io::Error>> {
         match self.get_mut() {
             MaybeHttpsStream::Plain(stream) => {
-                std::pin::Pin::new(stream).poll_write_vectored(cx, bufs)
+                hyper::rt::Write::poll_write_vectored(std::pin::Pin::new(stream), cx, bufs)
             },
-            MaybeHttpsStream::Https(tls) => std::pin::Pin::new(tls).poll_write_vectored(cx, bufs),
+            MaybeHttpsStream::Https(tls) => {
+                hyper::rt::Write::poll_write_vectored(std::pin::Pin::new(tls), cx, bufs)
+            },
         }
     }
 }
@@ -311,6 +331,9 @@ pub struct InstrumentedStream<T> {
 
 impl<T: Unpin> Unpin for InstrumentedStream<T> {}
 
+// hyper's Connect trait requires `Send + 'static` on the connection and an
+// `Unpin + Send` future; the blanket Connect impl is picked up through
+// `Service<Uri>`, so the `Service` impl below is written for `Uri`.
 impl<T> fmt::Debug for InstrumentedStream<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InstrumentedStream")
@@ -587,7 +610,7 @@ impl CertificateErrorOverrideManager {
 }
 
 #[derive(Clone, Debug, Default)]
-pub enum CACertificates<'de> {
+pub enum CACertificates {
     #[default]
     Default,
     Override(Vec<Vec<u8>>),
@@ -602,7 +625,7 @@ pub enum CACertificates<'de> {
 /// This is used when running the WPT tests.
 #[servo_tracing::instrument(skip_all)]
 pub fn create_tls_config(
-    ca_certificates: CACertificates<'static>,
+    ca_certificates: CACertificates,
     ignore_certificate_errors: bool,
     override_manager: CertificateErrorOverrideManager,
 ) -> TlsConfig {
