@@ -544,9 +544,10 @@ async fn run_parallel_scrape(
                     });
                 }
             }
+            let kernel_url = url.clone();
             let result = tokio::task::spawn_blocking(move || {
                 fetch_rendered(FetchRequest {
-                    url: url.clone(),
+                    url: kernel_url,
                     timeout_secs,
                     screenshot: false,
                     eval: (*eval).clone(),
