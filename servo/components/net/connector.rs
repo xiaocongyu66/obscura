@@ -97,7 +97,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// `boring_tls.rs` for the fingerprint policy.
 #[derive(Debug)]
 pub enum MaybeHttpsStream<S> {
-    Plain(S),
+    Plain(TokioIo<S>),
     Https(TokioIo<SslStream<S>>),
 }
 
@@ -268,7 +268,7 @@ impl ChromeHttpsConnector {
 }
 
 impl Service<Destination> for ChromeHttpsConnector {
-    type Response = MaybeHttpsStream<TokioIo<TcpStream>>;
+    type Response = MaybeHttpsStream<TcpStream>;
     type Error = ConnectionError;
     type Future = std::pin::Pin<
         Box<dyn Future<Output = Result<Self::Response, ConnectionError>> + Send>,
@@ -286,9 +286,10 @@ impl Service<Destination> for ChromeHttpsConnector {
         let http = self.http.clone();
 
         Box::pin(async move {
-            // ProxyConnector already yields TokioIo<TcpStream>; hyper's
-            // Read/Write bounds live on TokioIo, so both MaybeHttpsStream
-            // variants carry the wrapper rather than the raw socket.
+            // ProxyConnector yields TokioIo<TcpStream>; both enum variants
+            // carry a TokioIo so the hyper Read/Write impls come from the
+            // wrapper (btls SslStream only has tokio traits). The TLS
+            // handshake wants the raw socket, hence into_inner().
             let tcp = http.call(dest).await?;
             if scheme.as_deref() != Some("https") {
                 return Ok(MaybeHttpsStream::Plain(tcp));
@@ -300,7 +301,7 @@ impl Service<Destination> for ChromeHttpsConnector {
             let stream = boring_tls::connect_tls(
                 &connector,
                 &host,
-                tcp,
+                tcp.into_inner(),
                 chrome_version,
                 boring_tls::AlpnMode::Browser,
             )
@@ -355,7 +356,7 @@ pub struct TlsHandshakeInfo {
 
 impl<T> InstrumentedStream<T>
 where
-    T: Connection + hyper::rt::Read + hyper::rt::Write + Unpin,
+    T: Connection + Unpin,
 {
     fn from_maybe_https_stream(stream: MaybeHttpsStream<T>) -> Self {
         match stream {
@@ -376,7 +377,7 @@ where
 
 impl<T> Connection for InstrumentedStream<T>
 where
-    T: Connection + hyper::rt::Read + hyper::rt::Write + Unpin,
+    T: Connection + Unpin,
 {
     fn connected(&self) -> Connected {
         let connected = match &self.inner {
@@ -455,10 +456,10 @@ where
 }
 
 impl Service<Destination> for InstrumentedConnector<ChromeHttpsConnector> {
-    type Response = InstrumentedStream<TokioIo<TcpStream>>;
+    type Response = InstrumentedStream<TcpStream>;
     type Error = BoxError;
     type Future = std::pin::Pin<
-        Box<dyn Future<Output = Result<InstrumentedStream<TokioIo<TcpStream>>, BoxError>> + Send>,
+        Box<dyn Future<Output = Result<InstrumentedStream<TcpStream>>, BoxError>> + Send,
     >;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
