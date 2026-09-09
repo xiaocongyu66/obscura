@@ -18,17 +18,50 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use servo::{
-    LoadStatus, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext, WebView,
-    WebViewBuilder, WebViewDelegate,
+    CookieSource, LoadStatus, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext,
+    UserContentManager, WebView, WebViewBuilder, WebViewDelegate,
 };
 use url::Url;
 
-/// Delegate that just records load-status transitions; the harness polls.
+/// Delegate that records load-status transitions and broadcasts console
+/// messages to CDP subscribers (Runtime.consoleAPICalled backing).
 pub struct HeadlessDelegate {
     pub load_status: RefCell<Option<LoadStatus>>,
+    pub console_tx: Option<std::sync::mpsc::Sender<String>>,
+    /// Network.requestWillBeSent feed: one line per web resource the page
+    /// starts loading ("method\u{1f}url").
+    pub request_tx: Option<std::sync::mpsc::Sender<String>>,
 }
 
 impl WebViewDelegate for HeadlessDelegate {
+    fn show_console_message(
+        &self,
+        _webview: servo::WebView,
+        level: servo::ConsoleLogLevel,
+        message: String,
+    ) {
+        if let Some(tx) = &self.console_tx {
+            let level_name = match level {
+                servo::ConsoleLogLevel::Error => "error",
+                servo::ConsoleLogLevel::Warn => "warning",
+                _ => "log",
+            };
+            let _ = tx.send(format!("{level_name}\u{1f}{message}"));
+        }
+    }
+
+    fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
+        if let Some(tx) = &self.request_tx {
+            let req = load.request();
+            let _ = tx.send(format!(
+                "{}\u{1f}{}",
+                req.method.as_str(),
+                req.url
+            ));
+        }
+        // Not intercepted: the load continues as normal.
+    }
+
     fn notify_load_status_changed(&self, _webview: servo::WebView, status: LoadStatus) {
         *self.load_status.borrow_mut() = Some(status);
     }
@@ -40,6 +73,7 @@ pub struct HeadlessServo {
     webview: WebView,
     #[allow(dead_code)]
     delegate: Rc<HeadlessDelegate>,
+    user_content_manager: Rc<UserContentManager>,
 }
 
 /// Registrable-root approximation: last two labels (or three for
@@ -68,12 +102,45 @@ impl HeadlessServo {
         Self::new_with_profile(viewport, &profile)
     }
 
+    /// Like [`Self::new`] but routes page console messages to `console_tx`
+    /// (level\u{1f}message) for CDP Runtime.consoleAPICalled forwarding.
+    pub fn new_with_console(
+        viewport: (u32, u32),
+        console_tx: Option<std::sync::mpsc::Sender<String>>,
+    ) -> Result<Self, String> {
+        let profile = crate::fingerprint::random_profile()
+            .ok_or("no TLS-compatible Chrome profile")?;
+        Self::new_with_profile_and_console(viewport, &profile, console_tx)
+    }
+
     /// Boot with an explicit fingerprint profile: the UA preference carries
     /// the profile's Chrome UA so the HTTP layer and the JS-visible
     /// navigator agree.
     pub fn new_with_profile(
         viewport: (u32, u32),
         profile: &crate::fingerprint::UaProfile,
+    ) -> Result<Self, String> {
+        Self::new_with_profile_and_console(viewport, profile, None)
+    }
+
+    /// Boot with an explicit fingerprint profile and an optional console
+    /// message channel (level\u{1f}message) for CDP event forwarding.
+    pub fn new_with_profile_and_console(
+        viewport: (u32, u32),
+        profile: &crate::fingerprint::UaProfile,
+        console_tx: Option<std::sync::mpsc::Sender<String>>,
+    ) -> Result<Self, String> {
+        let (request_tx, _request_rx) = std::sync::mpsc::channel::<String>();
+        Self::new_full(viewport, profile, console_tx, request_tx)
+    }
+
+    /// Full-constructor: explicit fingerprint + console/request event
+    /// channels for CDP event forwarding.
+    pub fn new_full(
+        viewport: (u32, u32),
+        profile: &crate::fingerprint::UaProfile,
+        console_tx: Option<std::sync::mpsc::Sender<String>>,
+        request_tx: std::sync::mpsc::Sender<String>,
     ) -> Result<Self, String> {
         let size = dpi::PhysicalSize::new(viewport.0, viewport.1);
         let rendering_context = Rc::new(
@@ -100,17 +167,70 @@ impl HeadlessServo {
         }
         let delegate = Rc::new(HeadlessDelegate {
             load_status: RefCell::new(None),
+            console_tx,
+            request_tx: Some(request_tx),
         });
+        let user_content_manager = Rc::new(UserContentManager::new(&servo));
         let webview =
             WebViewBuilder::new(&servo, rendering_context.clone() as Rc<dyn RenderingContext>)
                 .delegate(delegate.clone())
+                .user_content_manager(user_content_manager.clone())
                 .build();
         Ok(Self {
             servo,
             rendering_context,
             webview,
             delegate,
+            user_content_manager,
         })
+    }
+
+    /// Register a script that runs before any future document's scripts —
+    /// the `Page.addScriptToEvaluateOnNewDocument` backing. Also evaluated
+    /// once immediately so scripts registered mid-session apply to the live
+    /// document the way a CDP client expects after its first navigation.
+    pub fn add_initialization_script(&self, script: &str) {
+        self.user_content_manager
+            .add_script(Rc::new(servo::UserScript::new(script.to_string(), None)));
+        let _ = self.evaluate_sync(script, Duration::from_secs(10));
+    }
+
+    /// All cookies the kernel's jar holds for the webview's current URL.
+    /// Returns raw cookie-rs `Cookie`s; `cdp_cookies_json` serializes them.
+    pub fn cookies_for_current_url(&self) -> Vec<cookie::Cookie<'static>> {
+        let url = self
+            .webview
+            .url()
+            .unwrap_or_else(|| Url::parse("about:blank").expect("about:blank always parses"));
+        self.servo
+            .site_data_manager()
+            .cookies_for_url(url, CookieSource::NonHTTP)
+    }
+
+    /// Insert a cookie for `url` from a Set-Cookie-style string
+    /// ("name=value; Path=/; Domain=example.com; Secure; HttpOnly").
+    pub fn set_cookie_for_url(&self, url: url::Url, cookie_string: &str) -> bool {
+        let parsed = match cookie::Cookie::parse(cookie_string.to_owned()) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("set_cookie_for_url: parse failed: {e}");
+                return false;
+            },
+        };
+        self.servo
+            .site_data_manager()
+            .set_cookie_for_url(url, parsed, None);
+        true
+    }
+
+    /// Pump the event loop for `millis` so setTimeout chains (gesture
+    /// replays, typing sequences) make progress.
+    pub fn settle(&self, millis: u64) {
+        let deadline = Instant::now() + Duration::from_millis(millis);
+        while Instant::now() < deadline {
+            self.servo.spin_event_loop();
+            std::thread::sleep(Duration::from_millis(8));
+        }
     }
 
     /// Pump the Servo event loop once.

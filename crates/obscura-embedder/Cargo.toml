@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cookie = { workspace = true }
 servo = { path = "../../servo/components/servo", default-features = false, features = ["bundled"] }
 url.workspace = true
 dpi.workspace = true
