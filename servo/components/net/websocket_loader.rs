@@ -270,7 +270,7 @@ async fn run_ws_loop<S>(
     // async-tungstenite drives the inner tungstenite socket through
     // futures-io traits; its tokio entry point wraps the socket in
     // TokioAdapter for us, so the established-stream generic lands here.
-    S: futures::AsyncRead + futures::AsyncWrite + Unpin,
+    S: futures_io::AsyncRead + futures_io::AsyncWrite + Unpin,
 {
     loop {
         select! {

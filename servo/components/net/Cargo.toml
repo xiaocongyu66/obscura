@@ -38,6 +38,7 @@ fst = { workspace = true }
 fonts = { workspace = true }
 futures = { workspace = true }
 futures-core = { workspace = true }
+futures-io = "0.3"
 futures-util = { workspace = true }
 headers = { workspace = true }
 http = { workspace = true }
