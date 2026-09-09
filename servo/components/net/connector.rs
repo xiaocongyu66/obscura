@@ -103,7 +103,7 @@ pub enum MaybeHttpsStream<S> {
 
 impl<S> MaybeHttpsStream<S>
 where
-    S: Connection + hyper::rt::Read + hyper::rt::Write + Unpin,
+    S: Unpin,
 {
     fn handshake_info(ssl: &SslStream<S>) -> Option<TlsHandshakeInfo> {
         let ssl = ssl.ssl();
@@ -157,9 +157,9 @@ where
 
 impl<S> hyper::rt::Read for MaybeHttpsStream<S>
 where
-    S: hyper::rt::Read + Unpin,
-    MaybeHttpsStream<S>: Unpin,
+    S: tokio::io::AsyncRead + Unpin,
 {
+
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -174,9 +174,9 @@ where
 
 impl<S> hyper::rt::Write for MaybeHttpsStream<S>
 where
-    S: hyper::rt::Write + Unpin,
-    MaybeHttpsStream<S>: Unpin,
+    S: tokio::io::AsyncWrite + Unpin,
 {
+
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -266,10 +266,10 @@ impl Service<Destination> for ChromeHttpsConnector {
         let http = self.http.clone();
 
         Box::pin(async move {
-            // The TCP half is wrapped in TokioIo immediately: hyper's
-            // Read/Write bounds live on TokioIo, not on TcpStream, so both
-            // enum variants must carry the wrapper.
-            let tcp = TokioIo::new(http.call(dest).await?);
+            // ProxyConnector already yields TokioIo<TcpStream>; hyper's
+            // Read/Write bounds live on TokioIo, so both MaybeHttpsStream
+            // variants carry the wrapper rather than the raw socket.
+            let tcp = http.call(dest).await?;
             if scheme.as_deref() != Some("https") {
                 return Ok(MaybeHttpsStream::Plain(tcp));
             }
