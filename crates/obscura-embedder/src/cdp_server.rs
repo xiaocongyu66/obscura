@@ -91,7 +91,7 @@ fn cookie_to_cdp_json(c: &cookie::Cookie<'static>, url: &str) -> Value {
     let domain = c.domain().unwrap_or("").to_string();
     let expires = c
         .expires_datetime()
-        .map(|t| t.timestamp() as f64)
+        .map(|t| t.unix_timestamp() as f64)
         .unwrap_or(SESSION_COOKIE_EXPIRES);
     json!({
         "name": c.name(),
@@ -204,9 +204,8 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
                         KernelReply::Ok(json!({ "cookies": json_cookies }))
                     },
                     KernelCmd::SetCookie(cookie_string) => {
-                        let url = match servo.webview().url() {
-                            Some(u) => u,
-                            None => KernelReply::Err("no page loaded".into()),
+                        let Some(url) = servo.webview().url() else {
+                            return KernelReply::Err("no page loaded".into());
                         };
                         let ok = servo.set_cookie_for_url(url, &cookie_string);
                         if ok { KernelReply::Ok(json!({ "success": true })) }
@@ -266,8 +265,8 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
     Ok(KernelHandle {
         tx: cmd_tx,
         rx: reply_rx.into(),
-        console_rx,
-        request_rx,
+        console_rx: console_rx.into(),
+        request_rx: request_rx.into(),
     })
 }
 
@@ -536,7 +535,7 @@ async fn handle_connection(
                 let value = params["value"].as_str().unwrap_or("");
                 let domain = params["domain"].as_str().unwrap_or("");
                 if name.is_empty() || domain.is_empty() {
-                    KernelReply::Err("setCookie: name and domain required".into())
+                    error_response(id, "setCookie: name and domain required".into())
                 } else {
                     let mut cookie_string = format!("{name}={value}; Domain={domain}");
                     if let Some(path) = params["path"].as_str() {
