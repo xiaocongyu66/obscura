@@ -48,9 +48,14 @@ pub fn fetch_rendered(req: FetchRequest) -> Result<FetchOutput, String> {
                 let screenshot_png = if want_shot {
                     let (w, h, rgba) = servo.screenshot_rgba_blocking(Duration::from_secs(20));
                     let mut png = Vec::new();
-                    image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut png))
-                        .write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)
-                        .map_err(|e| format!("png encode: {e}"))?;
+                    image::ImageEncoder::write_image(
+                        &image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut png)),
+                        &rgba,
+                        w,
+                        h,
+                        image::ExtendedColorType::Rgba8,
+                    )
+                    .map_err(|e| format!("png encode: {e}"))?;
                     Some(png)
                 } else {
                     None
