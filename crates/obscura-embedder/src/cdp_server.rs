@@ -195,7 +195,7 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
                     KernelCmd::GetCookies => {
                         let cookies = servo.cookies_for_current_url();
                         let url = servo.webview().url().unwrap_or_else(|| {
-                            "about:blank".parse().expect("about:blank parses")
+                            url::Url::parse("about:blank").expect("about:blank parses")
                         });
                         let json_cookies: Vec<Value> = cookies
                             .iter()
@@ -204,12 +204,16 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
                         KernelReply::Ok(json!({ "cookies": json_cookies }))
                     },
                     KernelCmd::SetCookie(cookie_string) => {
-                        let Some(url) = servo.webview().url() else {
-                            return KernelReply::Err("no page loaded".into());
-                        };
-                        let ok = servo.set_cookie_for_url(url, &cookie_string);
-                        if ok { KernelReply::Ok(json!({ "success": true })) }
-                        else { KernelReply::Err("cookie parse failed".into()) }
+                        match servo.webview().url() {
+                            None => KernelReply::Err("no page loaded".into()),
+                            Some(url) => {
+                                if servo.set_cookie_for_url(url, &cookie_string) {
+                                    KernelReply::Ok(json!({ "success": true }))
+                                } else {
+                                    KernelReply::Err("cookie parse failed".into())
+                                }
+                            },
+                        }
                     },
                     KernelCmd::HumanGesture { points, press, press_delay_ms, x, y } => {
                         // Real compositor input: each point is a genuine
@@ -549,10 +553,7 @@ async fn handle_connection(
                     }
                     if let Some(secs) = params["expires"].as_f64() {
                         if secs > 0.0 {
-                            // Format an HTTP-date from unix seconds.
-                            let days = (secs as i64) / 86400;
-                            let _ = days;
-                            cookie_string.push_str(&format!("; Max-Age={}", secs.max(0.0) as i64));
+                            cookie_string.push_str(&format!("; Max-Age={}", secs as i64));
                         }
                     }
                     reply_to_response(id, kernel.call(KernelCmd::SetCookie(cookie_string)))
