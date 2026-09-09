@@ -266,7 +266,10 @@ impl Service<Destination> for ChromeHttpsConnector {
         let http = self.http.clone();
 
         Box::pin(async move {
-            let tcp = http.call(dest).await?;
+            // The TCP half is wrapped in TokioIo immediately: hyper's
+            // Read/Write bounds live on TokioIo, not on TcpStream, so both
+            // enum variants must carry the wrapper.
+            let tcp = TokioIo::new(http.call(dest).await?);
             if scheme.as_deref() != Some("https") {
                 return Ok(MaybeHttpsStream::Plain(tcp));
             }
@@ -282,7 +285,7 @@ impl Service<Destination> for ChromeHttpsConnector {
                 boring_tls::AlpnMode::Browser,
             )
             .await
-                .map_err(ConnectionError::TlsError)?;
+            .map_err(ConnectionError::TlsError)?;
             Ok(MaybeHttpsStream::Https(TokioIo::new(stream)))
         })
     }
@@ -426,27 +429,23 @@ where
     }
 }
 
-impl<T> Service<Destination> for InstrumentedConnector<T>
-where
-    T: Service<Destination>,
-    T::Response: Connection + hyper::rt::Read + hyper::rt::Write + Send + Unpin + 'static,
-    T::Future: Send + 'static,
-    T::Error: Into<BoxError>,
-{
-    type Response = InstrumentedStream<T::Response>;
+impl Service<Destination> for InstrumentedConnector<ChromeHttpsConnector> {
+    type Response = InstrumentedStream<TokioIo<TcpStream>>;
     type Error = BoxError;
     type Future = std::pin::Pin<
-        Box<dyn Future<Output = Result<InstrumentedStream<T::Response>, BoxError>> + Send>,
+        Box<dyn Future<Output = Result<InstrumentedStream<TokioIo<TcpStream>>, BoxError>> + Send>,
     >;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(Into::into)
+        self.inner
+            .poll_ready(cx)
+            .map_err(|e| -> BoxError { e.into() })
     }
 
     fn call(&mut self, dst: Destination) -> Self::Future {
         let future = self.inner.call(dst);
         Box::pin(async move {
-            let stream = future.await.map_err(|error| -> BoxError { error })?;
+            let stream = future.await.map_err(|error| -> BoxError { error.into() })?;
             Ok(InstrumentedStream::from_maybe_https_stream(stream))
         })
     }
@@ -667,7 +666,5 @@ pub type ServoClient = Client<InstrumentedConnector<ChromeHttpsConnector>, Boxed
 pub fn create_http_client(tls_config: TlsConfig) -> ServoClient {
     let connector = ChromeHttpsConnector::new(tls_config);
 
-    Client::builder(TokioExecutor {})
-        .http1_title_case_headers(true)
-        .build(InstrumentedConnector::new(connector))
+    Client::builder(TokioExecutor {}).build(InstrumentedConnector::new(connector))
 }
