@@ -157,7 +157,7 @@ where
 
 impl<S> hyper::rt::Read for MaybeHttpsStream<S>
 where
-    S: tokio::io::AsyncRead + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
 
     fn poll_read(
@@ -180,7 +180,7 @@ where
 
 impl<S> hyper::rt::Write for MaybeHttpsStream<S>
 where
-    S: tokio::io::AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
 
     fn poll_write(
@@ -283,7 +283,7 @@ impl Service<Destination> for ChromeHttpsConnector {
         let host = dest.host().map(|h| h.to_string());
         let chrome_version = self.tls.chrome_version;
         let tls_config = self.tls.clone();
-        let http = self.http.clone();
+        let mut http = self.http.clone();
 
         Box::pin(async move {
             // ProxyConnector yields TokioIo<TcpStream>; both enum variants
@@ -459,7 +459,7 @@ impl Service<Destination> for InstrumentedConnector<ChromeHttpsConnector> {
     type Response = InstrumentedStream<TcpStream>;
     type Error = BoxError;
     type Future = std::pin::Pin<
-        Box<dyn Future<Output = Result<InstrumentedStream<TcpStream>>, BoxError>> + Send,
+        Box<dyn Future<Output = Result<InstrumentedStream<TcpStream>, BoxError>> + Send>,
     >;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
