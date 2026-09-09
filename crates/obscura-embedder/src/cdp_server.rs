@@ -539,7 +539,7 @@ async fn handle_connection(
                 let value = params["value"].as_str().unwrap_or("");
                 let domain = params["domain"].as_str().unwrap_or("");
                 if name.is_empty() || domain.is_empty() {
-                    error_response(id, "setCookie: name and domain required".into())
+                    error_response(id, "setCookie: name and domain required")
                 } else {
                     let mut cookie_string = format!("{name}={value}; Domain={domain}");
                     if let Some(path) = params["path"].as_str() {
