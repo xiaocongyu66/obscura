@@ -84,8 +84,18 @@ impl HeadlessServo {
         let servo = ServoBuilder::default().build();
         servo.setup_logging();
         // Servo's default UA carries a "Servo/" token that anti-bot layers
-        // (Bing, Cloudflare) treat as a bot signal. Present a Chrome UA.
+        // (Bing, Cloudflare) treat as a bot signal. Present a Chrome UA —
+        // and keep the TLS ClientHello on the same Chrome version as the UA.
         servo.set_preference("user_agent", servo::PrefValue::Str(profile.user_agent.clone()));
+        if let Some(chrome_version) = profile
+            .user_agent
+            .split("Chrome/")
+            .nth(1)
+            .and_then(|rest| rest.split('.').next())
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            servo::set_active_chrome_version(chrome_version);
+        }
         let delegate = Rc::new(HeadlessDelegate {
             load_status: RefCell::new(None),
         });

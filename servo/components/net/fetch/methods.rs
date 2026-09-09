@@ -38,7 +38,6 @@ use net_traits::{
 };
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
-use rustls_pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::CallbackSetter;
 use servo_base::id::PipelineId;
@@ -1059,10 +1058,7 @@ fn handle_allowcert_request(request: &mut Request, context: &FetchContext) -> io
         Err(_) => return error("Could not decode certificate base64"),
     };
 
-    context
-        .state
-        .override_manager
-        .add_override(&CertificateDer::from_slice(&cert_bytes).into_owned());
+    context.state.override_manager.add_override(&cert_bytes);
     Ok(())
 }
 

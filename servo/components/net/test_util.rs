@@ -21,12 +21,11 @@ use hyper::{Request as HyperRequest, Response as HyperResponse};
 use hyper_util::rt::tokio::TokioIo;
 use net_traits::AsyncRuntime;
 use net_traits::blob_url_store::UrlWithBlobClaim;
-use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use servo_default_resources as _;
 use servo_url::ServoUrl;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_rustls::{self, TlsAcceptor};
+use tokio_btls::SslStream;
+use btls::ssl::{SslAcceptor, SslMethod};
 
 use crate::async_runtime::{
     async_runtime_initialized, init_async_runtime, spawn_blocking_task, spawn_task,
@@ -153,27 +152,20 @@ where
 /// a vector of RusTLS [Certificate]s.
 fn load_certificates_from_pem(
     path: &PathBuf,
-) -> Result<Vec<CertificateDer<'static>>, Box<dyn std::error::Error>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    Ok(CertificateDer::pem_reader_iter(&mut reader).collect::<Result<Vec<_>, _>>()?)
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    let pem = std::fs::read(path)?;
+    Ok(btls::x509::X509::stack_from_pem(&pem)?
+        .iter()
+        .map(|cert| cert.to_der().map_err(|e| -> Box<dyn std::error::Error> { e.into() }))
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
-/// Given a path to a file containing PEM keys, load and parse them into
-/// a vector of RusTLS [PrivateKey]s.
-fn load_private_key_from_file(
-    path: &PathBuf,
-) -> Result<PrivateKeyDer<'static>, Box<dyn std::error::Error>> {
-    let file = File::open(&path)?;
-    let mut reader = BufReader::new(file);
-    let mut keys =
-        PrivatePkcs8KeyDer::pem_reader_iter(&mut reader).collect::<Result<Vec<_>, _>>()?;
-
-    match keys.len() {
-        0 => Err(format!("No PKCS8-encoded private key found in {path:?}").into()),
-        1 => Ok(PrivateKeyDer::try_from(keys.remove(0))?),
-        _ => Err(format!("More than one PKCS8-encoded private key found in {path:?}").into()),
-    }
+/// Given a path to a file containing PEM keys, load and parse the PKCS8
+/// private key into DER bytes.
+fn load_private_key_from_file(path: &PathBuf) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let pem = std::fs::read(path)?;
+    let key = btls::pkey::PKey::private_key_from_pem(&pem)?;
+    Ok(key.private_key_to_der_pkcs8()?)
 }
 
 pub fn make_ssl_server<H>(handler: H) -> (Server, UrlWithBlobClaim)
@@ -206,12 +198,15 @@ where
     let certificates = load_certificates_from_pem(&cert_path).expect("Invalid certificate");
     let key = load_private_key_from_file(&key_path).expect("Invalid key");
 
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certificates.clone(), key)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
-        .expect("Could not create rustls ServerConfig");
-    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let mut acceptor_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())
+        .expect("Could not create SSL acceptor builder");
+    let cert = btls::x509::X509::from_der(&certificates[0]).expect("Invalid test certificate");
+    let pkey = btls::pkey::PKey::private_key_from_pkcs8(&key).expect("Invalid test key");
+    acceptor_builder
+        .set_certificate(&cert)
+        .and_then(|_| acceptor_builder.set_private_key(&pkey))
+        .expect("Could not install test certificate");
+    let acceptor = Arc::new(acceptor_builder.build());
 
     let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
     let server = async move {
@@ -230,7 +225,20 @@ where
             let handler = handler.clone();
             let acceptor = acceptor.clone();
 
-            let stream = match acceptor.accept(stream).await {
+            let acceptor = acceptor.clone();
+            let tls = async move {
+                let ssl = btls::ssl::Ssl::new(acceptor.context())
+                    .map_err(|e| std::io::Error::other(format!("TLS setup: {e:?}")))?;
+                let mut tls = SslStream::new(ssl, stream)
+                    .map_err(|e| std::io::Error::other(format!("TLS stream: {e:?}")))?;
+                std::pin::Pin::new(&mut tls)
+                    .accept()
+                    .await
+                    .map_err(std::io::Error::other)?;
+                Ok::<SslStream<tokio::net::TcpStream>, std::io::Error>(tls)
+            }
+            .await;
+            let stream = match tls {
                 Ok(stream) => stream,
                 Err(_) => {
                     eprintln!("Error handling TLS stream.");

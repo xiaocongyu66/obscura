@@ -39,8 +39,6 @@ use profile_traits::mem::{
 use profile_traits::path;
 use profile_traits::time::ProfilerChan;
 use rustc_hash::FxHashMap;
-use rustls_pki_types::CertificateDer;
-use rustls_pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{
     self, CallbackSetter, GenericCallback, GenericReceiver, GenericReceiverSet,
@@ -73,13 +71,22 @@ use crate::request_interceptor::RequestInterceptor;
 use crate::websocket_loader::create_handshake_request;
 
 /// Load a file with CA certificate and produce a RootCertStore with the results.
-fn load_root_cert_store_from_file(file_path: String) -> io::Result<Vec<CertificateDer<'static>>> {
-    let mut pem = BufReader::new(File::open(file_path)?);
-
-    let certs = CertificateDer::pem_reader_iter(&mut pem)
-        .filter_map(|cert| {
-            cert.inspect_err(|e| log::error!("Could not load certificate ({e}). Ignoring it."))
-                .ok()
+fn load_root_cert_store_from_file(file_path: String) -> io::Result<Vec<Vec<u8>>> {
+    let pem = std::fs::read(&file_path)?;
+    let certs = btls::x509::X509::stack_from_pem(&pem)
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Could not parse certificates from {file_path}: {e:?}"),
+            )
+        })?
+        .into_iter()
+        .filter_map(|cert| match cert.to_der() {
+            Ok(der) => Some(der),
+            Err(e) => {
+                log::error!("Could not serialize certificate ({e:?}). Ignoring it.");
+                None
+            },
         })
         .collect();
     Ok(certs)

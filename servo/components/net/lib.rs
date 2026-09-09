@@ -5,6 +5,8 @@
 #![deny(unsafe_code)]
 
 pub mod async_runtime;
+pub mod boring_tls;
+pub mod chrome_tls;
 pub mod connector;
 pub mod cookie;
 pub mod cookie_storage;

@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_tungstenite::WebSocketStream;
-use async_tungstenite::tokio::{ConnectStream, client_async_tls_with_connector_and_config};
+use async_tungstenite::tokio::client_async_with_config;
+use async_tungstenite::WebSocketStream;
 use futures::stream::StreamExt;
 use headers::{
     Authorization, Connection, HeaderMapExt, SecWebsocketKey, SecWebsocketVersion, Upgrade,
@@ -31,13 +32,13 @@ use servo_url::ServoUrl;
 use tokio::net::TcpStream;
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
-use tokio_rustls::TlsConnector;
 use tungstenite::error::{Error, ProtocolError, UrlError};
 use tungstenite::handshake::client::Response;
 use tungstenite::protocol::CloseFrame;
 use tungstenite::{ClientRequestBuilder, Message};
 
 use crate::async_runtime::spawn_task;
+use crate::boring_tls;
 use crate::connector::TlsConfig;
 use crate::cookie::ServoCookie;
 use crate::hosts::replace_host;
@@ -208,11 +209,13 @@ fn setup_dom_listener(
 /// closes the connection or an error occurs. Since this is an async
 /// function that uses the select operation, it will run as a task
 /// on the WS tokio runtime.
-async fn run_ws_loop(
+async fn run_ws_loop<S>(
     mut dom_receiver: UnboundedReceiver<DomMsg>,
     resource_event_sender: IpcSender<WebSocketNetworkEvent>,
-    mut stream: WebSocketStream<ConnectStream>,
-) {
+    mut stream: WebSocketStream<S>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
         select! {
             dom_msg = dom_receiver.recv() => {
@@ -331,7 +334,6 @@ pub(crate) async fn start_websocket(
 
     let try_socket = TcpStream::connect((&*domain.to_string(), port)).await;
     let socket = try_socket.map_err(Error::Io)?;
-    let connector = TlsConnector::from(Arc::new(tls_config));
 
     // TODO(pylbrecht): move request conversion to a separate function
     let mut original_url = client.original_url();
@@ -349,8 +351,26 @@ pub(crate) async fn start_websocket(
         );
     }
 
-    let (stream, response) =
-        client_async_tls_with_connector_and_config(builder, socket, Some(connector), None).await?;
+    // The WS transport rides on the same Chrome-fingerprinted btls stack
+    // as HTTP: we do the TLS handshake here and hand the established
+    // stream to async-tungstenite's plain-text entry point. wss requests
+    // then present the identical ClientHello as page navigation.
+    let (stream, response) = if url.scheme() == "https" {
+        let connector = boring_tls::build_ssl_connector(&tls_config)
+            .map_err(|e| Error::Io(io::Error::other(format!("TLS context: {e:?}"))))?;
+        let tls_stream = boring_tls::connect_tls(
+            &connector,
+            &host,
+            socket,
+            tls_config.chrome_version,
+            boring_tls::AlpnMode::Http1Only,
+        )
+        .await
+        .map_err(|e| Error::Io(io::Error::other(e)))?;
+        client_async_with_config(builder, tls_stream, None).await?
+    } else {
+        client_async_with_config(builder, socket, None).await?
+    };
 
     let protocol_in_use = process_ws_response(&http_state, &response, &url, protocols)?;
 
