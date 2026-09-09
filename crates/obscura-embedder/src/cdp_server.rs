@@ -685,7 +685,7 @@ async fn handle_connection(
                         "(function(){{var els=document.querySelectorAll('*');var el=els[{}];if(el&&el.focus)el.focus();return !!el;}})()",
                         node.as_u64().unwrap_or(0).saturating_sub(1)
                     ),
-                    (_, sel) if sel.is_str() => format!(
+                    (_, sel) if sel.is_string() => format!(
                         "(function(){{var el=document.querySelector({});if(el&&el.focus)el.focus();return !!el;}})()",
                         serde_json::to_string(sel.as_str().unwrap_or("body")).unwrap_or_default()
                     ),
