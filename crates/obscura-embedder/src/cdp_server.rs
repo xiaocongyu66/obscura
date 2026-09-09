@@ -76,6 +76,16 @@ enum KernelCmd {
     GetMarkdown,
     StartScreencast { max_width: u32, max_height: u32, every_ms: u64 },
     StopScreencast,
+    FetchEnable { patterns: Vec<String> },
+    FetchDisable,
+    FetchContinue { request_id: String },
+    FetchFail { request_id: String },
+    FetchFulfill {
+        request_id: String,
+        status_code: u16,
+        headers: Vec<(String, String)>,
+        body_b64: String,
+    },
 }
 
 enum KernelReply {
@@ -144,6 +154,9 @@ struct KernelHandle {
     lifecycle_rx: std::sync::Mutex<Receiver<String>>,
     /// Screencast frames (base64 JPEG/PNG data) for Page.screencastFrame.
     frame_rx: std::sync::Mutex<Receiver<String>>,
+    /// Fetch/Network events ("requestPaused\u{1f}{json}") for the
+    /// Fetch.* domain and fulfill-driven Network.* events.
+    fetch_rx: std::sync::Mutex<Receiver<String>>,
 }
 
 impl KernelHandle {
@@ -161,6 +174,7 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
     let (request_tx, request_rx) = channel::<String>();
     let (lifecycle_tx, lifecycle_rx) = channel::<String>();
     let (frame_tx, frame_rx) = channel::<String>();
+    let (fetch_tx, fetch_rx) = channel::<String>();
     std::thread::Builder::new()
         .name("servo-kernel".into())
         .spawn(move || {
@@ -173,6 +187,7 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
                     Some(console_tx),
                     request_tx,
                     Some(lifecycle_tx),
+                    Some(fetch_tx),
                 ),
                 Err(e) => Err(e),
             };
@@ -296,6 +311,52 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
                         screencast_active = None;
                         KernelReply::Ok(json!({}))
                     },
+                    KernelCmd::FetchEnable { patterns } => {
+                        servo.set_fetch_interception(true, patterns);
+                        KernelReply::Ok(json!({}))
+                    },
+                    KernelCmd::FetchDisable => {
+                        servo.set_fetch_interception(false, Vec::new());
+                        KernelReply::Ok(json!({}))
+                    },
+                    KernelCmd::FetchContinue { request_id } => {
+                        if servo.fetch_continue(&request_id) {
+                            KernelReply::Ok(json!({}))
+                        } else {
+                            KernelReply::Err(format!("unknown requestId {request_id}"))
+                        }
+                    },
+                    KernelCmd::FetchFail { request_id } => {
+                        if servo.fetch_fail(&request_id) {
+                            KernelReply::Ok(json!({}))
+                        } else {
+                            KernelReply::Err(format!("unknown requestId {request_id}"))
+                        }
+                    },
+                    KernelCmd::FetchFulfill { request_id, status_code, headers, body_b64 } => {
+                        use base64::Engine as _;
+                        let body = base64::engine::general_purpose::STANDARD
+                            .decode(body_b64.as_bytes())
+                            .unwrap_or_default();
+                        if servo.fetch_fulfill(&request_id, status_code, headers, body) {
+                            // The synthetic response is real data: emit the
+                            // Network pair with it.
+                            let _ = fetch_tx.send(format!(
+                                "responseReceived\u{1f}{}",
+                                json!({
+                                    "requestId": request_id,
+                                    "response": { "status": status_code },
+                                })
+                            ));
+                            let _ = fetch_tx.send(format!(
+                                "loadingFinished\u{1f}{}",
+                                json!({ "requestId": request_id })
+                            ));
+                            KernelReply::Ok(json!({}))
+                        } else {
+                            KernelReply::Err(format!("unknown requestId {request_id}"))
+                        }
+                    },
                     KernelCmd::Reload => {
                         servo.reload();
                         servo.settle(100);
@@ -365,6 +426,7 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
         request_rx: request_rx.into(),
         lifecycle_rx: lifecycle_rx.into(),
         frame_rx: frame_rx.into(),
+        fetch_rx: fetch_rx.into(),
     })
 }
 
@@ -500,6 +562,39 @@ async fn handle_connection(
                         .await
                         .map_err(|e| format!("ws write: {e}"))?;
                     event_counter += 1;
+                },
+                Err(_) => break,
+            }
+        }
+        // Forward Fetch-domain events (requestPaused + fulfill-driven
+        // Network.responseReceived/loadingFinished).
+        loop {
+            let pending = kernel.fetch_rx.lock().expect("fetch lock").try_recv();
+            match pending {
+                Ok(line) => {
+                    let (kind, payload) = line
+                        .split_once('\u{1f}')
+                        .unwrap_or(("requestPaused", "{}"));
+                    let params: Value = serde_json::from_str(payload).unwrap_or(json!({}));
+                    let event = json!({
+                        "method": format!("Fetch.{kind}"),
+                        "params": params,
+                    });
+                    let out = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+                    ws.send(tokio_tungstenite::tungstenite::Message::text(out))
+                        .await
+                        .map_err(|e| format!("ws write: {e}"))?;
+                    // fulfillment also emits the Network pair (real data)
+                    if kind == "responseReceived" || kind == "loadingFinished" {
+                        let event = json!({
+                            "method": format!("Network.{kind}"),
+                            "params": params,
+                        });
+                        let out = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+                        ws.send(tokio_tungstenite::tungstenite::Message::text(out))
+                            .await
+                            .map_err(|e| format!("ws write: {e}"))?;
+                    }
                 },
                 Err(_) => break,
             }
@@ -735,6 +830,53 @@ async fn handle_connection(
                     (KernelReply::Err(e), _) | (_, KernelReply::Err(e)) => error_response(id, e),
                     _ => to_response(id, KernelReply::Ok(json!({})), json!({})),
                 }
+            },
+            "Fetch.enable" => {
+                let patterns: Vec<String> = params["patterns"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|p| p["urlPattern"].as_str().map(ToString::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                reply_to_response(id, kernel.call(KernelCmd::FetchEnable { patterns }))
+            },
+            "Fetch.disable" => reply_to_response(id, kernel.call(KernelCmd::FetchDisable)),
+            "Fetch.continueRequest" => {
+                let request_id = params["requestId"].as_str().unwrap_or("").to_string();
+                reply_to_response(id, kernel.call(KernelCmd::FetchContinue { request_id }))
+            },
+            "Fetch.failRequest" => {
+                let request_id = params["requestId"].as_str().unwrap_or("").to_string();
+                reply_to_response(id, kernel.call(KernelCmd::FetchFail { request_id }))
+            },
+            "Fetch.fulfillRequest" => {
+                let request_id = params["requestId"].as_str().unwrap_or("").to_string();
+                let status_code = params["responseCode"].as_u64().unwrap_or(200) as u16;
+                let headers: Vec<(String, String)> = params["responseHeaders"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|h| {
+                                Some((
+                                    h["name"].as_str()?.to_string(),
+                                    h["value"].as_str()?.to_string(),
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let body_b64 = params["body"].as_str().unwrap_or("").to_string();
+                reply_to_response(
+                    id,
+                    kernel.call(KernelCmd::FetchFulfill {
+                        request_id,
+                        status_code,
+                        headers,
+                        body_b64,
+                    }),
+                )
             },
             "Target.getTargetInfo" | "Target.getTargets" => to_response(
                 id,

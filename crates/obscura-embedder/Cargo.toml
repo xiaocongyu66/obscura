@@ -15,6 +15,7 @@ keyboard-types = "0.8.3"
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+http.workspace = true
 image.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "macros"] }
 tokio-tungstenite.workspace = true

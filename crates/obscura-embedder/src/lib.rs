@@ -21,7 +21,37 @@ use servo::{
     CookieSource, LoadStatus, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext,
     UserContentManager, WebView, WebViewBuilder, WebViewDelegate,
 };
+use serde_json::json;
 use url::Url;
+
+/// Fetch-domain interception state shared between the delegate (which sees
+/// every web resource the page loads) and the CDP command loop (which owns
+/// the client's continue/fail/fulfill decisions).
+///
+/// Invariants:
+/// - only touched from the kernel thread (delegate callbacks and command
+///   handling both run there), so plain Mutex suffices;
+/// - a load removed from `pending` and dropped forwards the original
+///   request (the responder's default is DoNotIntercept) — that is CDP
+///   Fetch.continueRequest;
+/// - intercepting then cancelling fails the load (Fetch.failRequest), and
+///   intercepting with a response + body + finish fulfills it.
+pub struct FetchState {
+    pub enabled: bool,
+    /// Substring URL filters (empty = intercept everything) — the shape the
+    /// Go client and Puppeteer route() actually use.
+    pub patterns: Vec<String>,
+    pub pending: std::collections::HashMap<String, servo::WebResourceLoad>,
+    pub next_id: u64,
+}
+
+impl FetchState {
+    fn matches(&self, url: &str) -> bool {
+        !self.enabled
+            || self.patterns.is_empty()
+            || self.patterns.iter().any(|p| url.contains(p.as_str()))
+    }
+}
 
 /// Delegate that records load-status transitions and broadcasts console
 /// messages to CDP subscribers (Runtime.consoleAPICalled backing).
@@ -35,6 +65,10 @@ pub struct HeadlessDelegate {
     /// ("domContentEventFired\u{1f}" / "loadEventFired\u{1f}" /
     ///  "frameNavigated\u{1f}<url>" / "urlChanged\u{1f}<url>").
     pub lifecycle_tx: Option<std::sync::mpsc::Sender<String>>,
+    /// Shared Fetch-domain state (enabled flag + pending intercepted loads).
+    pub fetch_state: Arc<std::sync::Mutex<FetchState>>,
+    /// Fetch/Network event feed ("requestPaused\u{1f}{json}" etc.).
+    pub fetch_tx: Option<std::sync::mpsc::Sender<String>>,
 }
 
 impl WebViewDelegate for HeadlessDelegate {
@@ -69,7 +103,36 @@ impl WebViewDelegate for HeadlessDelegate {
                 req.url
             ));
         }
-        // Not intercepted: the load continues as normal.
+        // Fetch-domain gate: when enabled and matching, hold the load and
+        // ask the client (Fetch.requestPaused). Otherwise drop the load —
+        // the responder's default lets the original request proceed.
+        let url = load.request().url.to_string();
+        let method = load.request().method.as_str().to_string();
+        let is_main = load.request().is_for_main_frame;
+        let mut state = self.fetch_state.lock().expect("fetch state");
+        if state.matches(&url) {
+            let id = state.next_id;
+            state.next_id += 1;
+            let paused = json!({
+                "requestId": format!("interception-{id}"),
+                "request": {
+                    "url": url,
+                    "method": method,
+                    "headers": {},
+                    "isMainFrame": is_main,
+                },
+                "resourceType": if is_main { "Document" } else { "Other" },
+            });
+            state
+                .pending
+                .insert(format!("interception-{id}"), load);
+            if let Some(tx) = &self.fetch_tx {
+                let _ = tx.send(format!(
+                    "requestPaused\u{1f}{}",
+                    serde_json::to_string(&paused).unwrap_or_default()
+                ));
+            }
+        }
     }
 
     fn notify_load_status_changed(&self, _webview: servo::WebView, status: LoadStatus) {
@@ -99,6 +162,8 @@ pub struct HeadlessServo {
     #[allow(dead_code)]
     delegate: Rc<HeadlessDelegate>,
     user_content_manager: Rc<UserContentManager>,
+    /// Fetch-domain interception state (shared with the delegate).
+    fetch_state: Arc<std::sync::Mutex<FetchState>>,
 }
 
 /// Registrable-root approximation: last two labels (or three for
@@ -156,7 +221,7 @@ impl HeadlessServo {
         console_tx: Option<std::sync::mpsc::Sender<String>>,
     ) -> Result<Self, String> {
         let (request_tx, _request_rx) = std::sync::mpsc::channel::<String>();
-        Self::new_full(viewport, profile, console_tx, request_tx, None)
+        Self::new_full(viewport, profile, console_tx, request_tx, None, None)
     }
 
     /// Full-constructor: explicit fingerprint + console/request event
@@ -167,6 +232,7 @@ impl HeadlessServo {
         console_tx: Option<std::sync::mpsc::Sender<String>>,
         request_tx: std::sync::mpsc::Sender<String>,
         lifecycle_tx: Option<std::sync::mpsc::Sender<String>>,
+        fetch_tx: Option<std::sync::mpsc::Sender<String>>,
     ) -> Result<Self, String> {
         let size = dpi::PhysicalSize::new(viewport.0, viewport.1);
         let rendering_context = Rc::new(
@@ -191,11 +257,19 @@ impl HeadlessServo {
         {
             servo::set_active_chrome_version(chrome_version);
         }
+        let fetch_state = Arc::new(std::sync::Mutex::new(FetchState {
+            enabled: false,
+            patterns: Vec::new(),
+            pending: std::collections::HashMap::new(),
+            next_id: 1,
+        }));
         let delegate = Rc::new(HeadlessDelegate {
             load_status: RefCell::new(None),
             console_tx,
             request_tx: Some(request_tx),
             lifecycle_tx,
+            fetch_state: fetch_state.clone(),
+            fetch_tx,
         });
         let user_content_manager = Rc::new(UserContentManager::new(&servo));
         let webview =
@@ -209,7 +283,83 @@ impl HeadlessServo {
             webview,
             delegate,
             user_content_manager,
+            fetch_state,
         })
+    }
+
+    /// Enable/disable Fetch-domain interception (Fetch.enable/disable).
+    /// Patterns are substring URL filters; empty means every request.
+    pub fn set_fetch_interception(&self, enabled: bool, patterns: Vec<String>) {
+        let mut state = self.fetch_state.lock().expect("fetch state");
+        state.enabled = enabled;
+        state.patterns = patterns;
+        if !enabled {
+            // Dropping pending loads releases them (DoNotIntercept default).
+            state.pending.clear();
+        }
+    }
+
+    /// Fetch.continueRequest: release a held load unmodified.
+    pub fn fetch_continue(&self, request_id: &str) -> bool {
+        self.fetch_state
+            .lock()
+            .expect("fetch state")
+            .pending
+            .remove(request_id)
+            .is_some()
+    }
+
+    /// Fetch.failRequest: cancel the held load (network error on the page).
+    pub fn fetch_fail(&self, request_id: &str) -> bool {
+        let mut state = self.fetch_state.lock().expect("fetch state");
+        match state.pending.remove(request_id) {
+            Some(load) => {
+                let url = load.request().url.clone();
+                let intercepted = load.intercept(servo::WebResourceResponse::new(url));
+                let _ = intercepted.cancel();
+                true
+            },
+            None => false,
+        }
+    }
+
+    /// Fetch.fulfillRequest: answer the held load with a synthetic response.
+    /// Returns true when the load was held; the caller emits
+    /// Network.responseReceived/loadingFinished with the same data.
+    pub fn fetch_fulfill(
+        &self,
+        request_id: &str,
+        status_code: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> bool {
+        let mut state = self.fetch_state.lock().expect("fetch state");
+        let Some(load) = state.pending.remove(request_id) else {
+            return false;
+        };
+        let url = load.request().url.clone();
+        let mut header_map = http::HeaderMap::new();
+        for (name, value) in headers {
+            if let (Ok(name), Ok(value)) = (
+                http::HeaderName::from_bytes(name.as_bytes()),
+                http::HeaderValue::from_str(&value),
+            ) {
+                header_map.insert(name, value);
+            }
+        }
+        let mut intercepted = load.intercept(
+            servo::WebResourceResponse::new(url)
+                .headers(header_map)
+                .status_code(
+                    http::StatusCode::from_u16(status_code)
+                        .unwrap_or(http::StatusCode::OK),
+                ),
+        );
+        if !body.is_empty() {
+            intercepted.send_body_data(body);
+        }
+        intercepted.finish();
+        true
     }
 
     /// Register a script that runs before any future document's scripts —
