@@ -7,13 +7,8 @@ repository.workspace = true
 
 [features]
 default = []
-stealth = ["obscura-browser/stealth", "obscura-net/stealth"]
-render = ["obscura-browser/render", "dep:base64"]
 
 [dependencies]
-obscura-browser = { workspace = true }
-obscura-dom = { workspace = true }
-obscura-net = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 url = { workspace = true }
@@ -21,5 +16,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-base64 = { workspace = true, optional = true }
 futures-util = "0.3"
