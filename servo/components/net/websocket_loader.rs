@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_tungstenite::WebSocketStream;
 use async_tungstenite::tokio::client_async_with_config;
-use async_tungstenite::WebSocketStream;
 use futures::stream::StreamExt;
 use headers::{
     Authorization, Connection, HeaderMapExt, SecWebsocketKey, SecWebsocketVersion, Upgrade,

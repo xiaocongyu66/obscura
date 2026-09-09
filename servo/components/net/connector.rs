@@ -379,7 +379,8 @@ where
 
 impl<T> hyper::rt::Read for InstrumentedStream<T>
 where
-    T: Connection + hyper::rt::Read + hyper::rt::Write + Unpin,
+    T: tokio::io::AsyncRead + Unpin,
+    MaybeHttpsStream<T>: hyper::rt::Read,
 {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
@@ -392,7 +393,8 @@ where
 
 impl<T> hyper::rt::Write for InstrumentedStream<T>
 where
-    T: Connection + hyper::rt::Read + hyper::rt::Write + Unpin,
+    T: tokio::io::AsyncWrite + Unpin,
+    MaybeHttpsStream<T>: hyper::rt::Write,
 {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
