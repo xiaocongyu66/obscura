@@ -2,7 +2,7 @@
 //! the cdp_server kernel thread but with the CLI dump surface instead of a
 //! WS protocol. The kernel lives only as long as the request.
 
-use crate::page_dumps::{dump_assets, dump_cookies, dump_html, dump_links, dump_markdown, dump_text};
+use crate::page_dumps::dump_markdown;
 use crate::HeadlessServo;
 use std::sync::mpsc::channel;
 use std::time::Duration;
@@ -65,13 +65,37 @@ pub fn fetch_rendered(req: FetchRequest) -> Result<FetchOutput, String> {
                     Some(expr) => Some(servo.evaluate_sync(expr, Duration::from_secs(30))?),
                     None => None,
                 };
+                // One round-trip for everything except markdown (its script
+                // is separate); falls back to the individual dumps on error.
+                let (html, text, links, assets, cookies) =
+                    match crate::page_dumps::dump_all_json(&servo) {
+                        Ok(json) => {
+                            let v: serde_json::Value = serde_json::from_str(&json)
+                                .unwrap_or(serde_json::Value::Null);
+                            (
+                                v["html"].as_str().unwrap_or_default().to_string(),
+                                v["text"].as_str().unwrap_or_default().to_string(),
+                                v["links"].as_str().unwrap_or_default().to_string(),
+                                v["assets"].as_str().unwrap_or_default().to_string(),
+                                v["cookies"].as_str().unwrap_or_default().to_string(),
+                            )
+                        },
+                        Err(_) => (
+                            dump_html(&servo)?,
+                            dump_text(&servo)?,
+                            dump_links(&servo)?,
+                            dump_assets(&servo)?,
+                            dump_cookies(&servo)?,
+                        ),
+                    };
+                let markdown = dump_markdown(&servo)?;
                 Ok(FetchOutput {
-                    html: dump_html(&servo)?,
-                    text: dump_text(&servo)?,
-                    links: dump_links(&servo)?,
-                    markdown: dump_markdown(&servo)?,
-                    assets: dump_assets(&servo)?,
-                    cookies: dump_cookies(&servo)?,
+                    html,
+                    text,
+                    links,
+                    markdown,
+                    assets,
+                    cookies,
                     screenshot_png,
                     eval_value,
                 })

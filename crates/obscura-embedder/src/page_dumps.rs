@@ -154,6 +154,53 @@ pub fn dump_cookies(servo: &HeadlessServo) -> Result<String, String> {
     })
 }
 
+/// All six dumps in ONE kernel round-trip: the CLI fetch path used to pay
+/// six evaluate_sync latencies per page; this pays one.
+pub fn dump_all_json(servo: &HeadlessServo) -> Result<String, String> {
+    servo.evaluate_sync(
+        r#"JSON.stringify((function() {
+            function resolve(el, attr) {
+                var v = el.getAttribute(attr);
+                return v ? el[attr] || new URL(v, document.baseURI).href : null;
+            }
+            var assets = [], seenA = {};
+            function pushA(v) { if (v && !seenA[v]) { seenA[v] = 1; assets.push(v); } }
+            var sel = 'script[src], link[href], img[src], iframe[src], ' +
+                      'audio[src], video[src], source[src], embed[src], object[data]';
+            var nodes = document.querySelectorAll(sel);
+            for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i], tag = el.tagName.toLowerCase();
+                if (tag === 'object') pushA(resolve(el, 'data'));
+                else if (tag === 'link') pushA(resolve(el, 'href'));
+                else pushA(resolve(el, 'src'));
+            }
+            var links = [], seenL = {};
+            var anchors = document.querySelectorAll('a[href]');
+            for (var j = 0; j < anchors.length; j++) {
+                var href = anchors[j].href;
+                if (href && !seenL[href]) { seenL[href] = 1; links.push(href); }
+            }
+            var raw = document.cookie || '', pairs = [];
+            raw.split('; ').forEach(function(p) {
+                if (!p) return;
+                var eq = p.indexOf('=');
+                var k = eq === -1 ? p : p.slice(0, eq);
+                var v = eq === -1 ? '' : p.slice(eq + 1);
+                pairs.push('{"name":' + JSON.stringify(k) + ',"value":' + JSON.stringify(v) + '}');
+            });
+            return {
+                html: document.documentElement.outerHTML,
+                text: document.body ? document.body.innerText
+                                    : document.documentElement.textContent,
+                links: links.join('\n'),
+                assets: assets.join('\n'),
+                cookies: '[' + pairs.join(',') + ']'
+            };
+        })())"#,
+        EVAL_TIMEOUT,
+    )
+}
+
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

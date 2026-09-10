@@ -74,6 +74,9 @@ pub struct HeadlessDelegate {
     pub fetch_state: Arc<std::sync::Mutex<FetchState>>,
     /// Fetch/Network event feed ("requestPaused\u{1f}{json}" etc.).
     pub fetch_tx: Option<std::sync::mpsc::Sender<String>>,
+    /// Flipped when the compositor reports a new frame is ready
+    /// (notify_new_frame_ready); the pump waits on this.
+    pub frame_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl WebViewDelegate for HeadlessDelegate {
@@ -91,6 +94,11 @@ impl WebViewDelegate for HeadlessDelegate {
             };
             let _ = tx.send(format!("{level_name}\u{1f}{message}"));
         }
+    }
+
+    fn notify_new_frame_ready(&self, _webview: servo::WebView) {
+        use std::sync::atomic::Ordering;
+        self.frame_ready.store(true, Ordering::Release);
     }
 
     fn notify_url_changed(&self, _webview: servo::WebView, url: Url) {
@@ -160,8 +168,11 @@ impl WebViewDelegate for HeadlessDelegate {
     }
 }
 
+/// Field order IS teardown order: `webview` must send CloseWebView and
+/// `user_content_manager` (which clones the Servo handle) must release
+/// before `servo`, so ServoInner's Drop fires last and spins the
+/// constellation to a clean Exit. Reordering these leaks the kernel.
 pub struct HeadlessServo {
-    servo: Servo,
     rendering_context: Rc<SoftwareRenderingContext>,
     webview: WebView,
     #[allow(dead_code)]
@@ -169,6 +180,10 @@ pub struct HeadlessServo {
     user_content_manager: Rc<UserContentManager>,
     /// Fetch-domain interception state (shared with the delegate).
     fetch_state: Arc<std::sync::Mutex<FetchState>>,
+    /// Set by the delegate on `notify_new_frame_ready` — the event-driven
+    /// pump waits on this instead of blind-polling at fixed intervals.
+    frame_ready: Arc<std::sync::atomic::AtomicBool>,
+    servo: Servo,
 }
 
 /// Registrable-root approximation: last two labels (or three for
@@ -262,12 +277,14 @@ impl HeadlessServo {
         {
             servo::set_active_chrome_version(chrome_version);
         }
+        use std::sync::atomic::AtomicBool;
         let fetch_state = Arc::new(std::sync::Mutex::new(FetchState {
             enabled: false,
             patterns: Vec::new(),
             pending: std::collections::HashMap::new(),
             next_id: 1,
         }));
+        let frame_ready = Arc::new(AtomicBool::new(false));
         let delegate = Rc::new(HeadlessDelegate {
             load_status: RefCell::new(None),
             console_tx,
@@ -275,6 +292,7 @@ impl HeadlessServo {
             lifecycle_tx,
             fetch_state: fetch_state.clone(),
             fetch_tx,
+            frame_ready: frame_ready.clone(),
         });
         let user_content_manager = Rc::new(UserContentManager::new(&servo));
         let webview =
@@ -283,13 +301,56 @@ impl HeadlessServo {
                 .user_content_manager(user_content_manager.clone())
                 .build();
         Ok(Self {
-            servo,
             rendering_context,
             webview,
             delegate,
             user_content_manager,
             fetch_state,
+            frame_ready,
+            servo,
         })
+    }
+
+    /// Pump until the compositor reports a new frame or `timeout` elapses.
+    /// Busy-spins the event loop (no sleep) so latency tracks the kernel:
+    /// frames surface the moment they're ready; idle waits cost one spin
+    /// per poll tick instead of waking on a fixed clock.
+    pub fn pump_until_frame(&self, timeout: Duration) -> bool {
+        use std::sync::atomic::Ordering;
+        let start = Instant::now();
+        loop {
+            if self
+                .frame_ready
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+            self.servo.spin_event_loop();
+            if self
+                .frame_ready
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+            if start.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Render + present once a frame is ready (or timeout), then read back.
+    /// Replaces the fixed 16ms poll loops at call sites.
+    pub fn render_when_ready(&self, timeout: Duration) {
+        if self.pump_until_frame(timeout) {
+            self.render_frame();
+            self.present();
+        } else {
+            self.render_frame();
+            self.present();
+        }
     }
 
     /// Enable/disable Fetch-domain interception (Fetch.enable/disable).
@@ -441,7 +502,16 @@ impl HeadlessServo {
         let deadline = Instant::now() + Duration::from_millis(millis);
         while Instant::now() < deadline {
             self.servo.spin_event_loop();
-            std::thread::sleep(Duration::from_millis(8));
+            if self
+                .frame_ready
+                .compare_exchange(true, false, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+                .is_ok()
+            {
+                self.render_frame();
+                self.present();
+                continue;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -480,6 +550,16 @@ impl HeadlessServo {
         let start = Instant::now();
         loop {
             self.servo.spin_event_loop();
+            // Event-driven assist: while a frame is pending, render it
+            // immediately instead of waiting for the next poll tick.
+            if self
+                .frame_ready
+                .compare_exchange(true, false, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+                .is_ok()
+            {
+                self.render_frame();
+                self.present();
+            }
             // Complete alone is not enough: the about:blank initial load also
             // completes, so require the visible URL to have reached the
             // target host as well (redirects keep the host suffix family).
@@ -539,12 +619,13 @@ impl HeadlessServo {
                 start.elapsed() < deadline,
                 "screenshot_rgba_blocking: compositor did not produce a frame within {deadline:?}"
             );
-            self.spin();
+            self.servo.spin_event_loop();
             self.render_frame();
             if let Some(img) = result.borrow_mut().take() {
                 break img;
             }
-            std::thread::sleep(Duration::from_millis(16));
+            // Busy at 2ms: screenshot latency matters more than idle CPU.
+            std::thread::sleep(Duration::from_millis(2));
         };
         (img.width(), img.height(), img.into_raw())
     }
@@ -563,5 +644,20 @@ impl HeadlessServo {
         let w = image.width();
         let h = image.height();
         Ok((w, h, image.into_raw()))
+    }
+}
+
+/// Deterministic teardown. Field order does the heavy lifting — `webview`
+/// drops before `servo` (CloseWebView first), `user_content_manager`
+/// releases its Servo clone before the last reference goes away — and
+/// this final spin drains the constellation's shutdown handshake so the
+/// mozjs isolate and GL context are freed here, not at process exit.
+impl Drop for HeadlessServo {
+    fn drop(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            self.servo.spin_event_loop();
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }
