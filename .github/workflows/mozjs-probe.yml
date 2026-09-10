@@ -38,6 +38,11 @@ jobs:
         run: |
           cargo build -p obscura-embedder --bin cf_demo 2>&1 | tail -5
           RUST_LOG=warn ./target/debug/cf_demo
+      - name: wpt.live connectivity probe (system curl vs kernel)
+        run: |
+          getent hosts wpt.live || echo "DNS-FAIL wpt.live"
+          curl -sI --max-time 20 https://wpt.live/dom/collections/HTMLCollection-live.html | head -3 || echo "CURL-FAIL wpt.live"
+          curl -sI --max-time 20 https://w3c-test.org/dom/collections/HTMLCollection-live.html | head -3 || echo "CURL-FAIL w3c-test.org"
       - name: WPT smoke (curated DOM/event/selector cases)
         run: |
           cargo build -p obscura-embedder --bin wpt_smoke 2>&1 | tail -5
