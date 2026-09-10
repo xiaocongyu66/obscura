@@ -294,9 +294,11 @@ impl Service<Destination> for ChromeHttpsConnector {
             // carry a TokioIo so the hyper Read/Write impls come from the
             // wrapper (btls SslStream only has tokio traits). The TLS
             // handshake wants the raw socket, hence into_inner().
-            log::debug!("chrome-connect: begin {scheme}://{host:?}");
+            log::debug!("chrome-connect: begin {scheme}://{}", host.as_deref().unwrap_or(""));
+            log::debug!("chrome-connect: waiting for tcp");
             let tcp = http.call(dest).await?;
-            log::debug!("chrome-connect: tcp ok for {scheme}://{host:?}");
+            log::debug!("chrome-connect: tcp ok for {scheme}://{}", host.as_deref().unwrap_or(""));
+            log::debug!("chrome-connect: starting tls");
             if scheme.as_deref() != Some("https") {
                 return Ok(MaybeHttpsStream::Plain(tcp));
             }
