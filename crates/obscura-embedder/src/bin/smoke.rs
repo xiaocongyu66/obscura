@@ -32,9 +32,13 @@ fn main() {
         }
     });
     let img = loop {
+        let shot_timeout = std::env::var("OBSCURA_SMOKE_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(90);
         assert!(
-            start.elapsed() < Duration::from_secs(90),
-            "screenshot callback never arrived within 90s (compositor stalled)"
+            start.elapsed() < Duration::from_secs(shot_timeout),
+            "screenshot callback never arrived within {shot_timeout}s (compositor stalled)"
         );
         servo.spin();
         servo.render_frame();
