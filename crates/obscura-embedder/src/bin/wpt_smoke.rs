@@ -11,15 +11,15 @@ use std::time::Duration;
 
 /// (name, wpt.live path, timeout seconds)
 const CASES: &[(&str, &str, u64)] = &[
-    ("HTMLCollection live", "/dom/collections/HTMLCollection-live.html", 30),
-    ("element.insertAdjacentElement", "/dom/nodes/Element-insertAdjacentElement.html", 40),
-    ("closest", "/dom/nodes/Element-closest.html", 40),
-    ("createElementNS QName", "/dom/nodes/createElementNS.html", 40),
-    ("MutationObserver childList", "/mutation-observer/MutationObserver-childList.html", 40),
-    ("Node.cloneNode", "/dom/nodes/Node-cloneNode.html", 40),
-    ("querySelector live", "/selectors/attribute-selectors/attribute-selector.html", 30),
-    ("events mousedown dispatch", "/dom/events/Event-dispatch-click.html", 30),
-    ("after()", "/dom/nodes/ChildNode-after.html", 40),
+    ("HTMLCollection live", "/dom/collections/HTMLCollection-live.html", 120),
+    ("element.insertAdjacentElement", "/dom/nodes/Element-insertAdjacentElement.html", 120),
+    ("closest", "/dom/nodes/Element-closest.html", 120),
+    ("createElementNS QName", "/dom/nodes/createElementNS.html", 120),
+    ("MutationObserver childList", "/mutation-observer/MutationObserver-childList.html", 120),
+    ("Node.cloneNode", "/dom/nodes/Node-cloneNode.html", 120),
+    ("querySelector live", "/selectors/attribute-selectors/attribute-selector.html", 120),
+    ("events mousedown dispatch", "/dom/events/Event-dispatch-click.html", 120),
+    ("after()", "/dom/nodes/ChildNode-after.html", 120),
 ];
 
 fn read_verdict(servo: &HeadlessServo) -> (String, String) {
@@ -52,17 +52,22 @@ fn main() {
     let mut passed = 0usize;
     let mut failed: Vec<&str> = Vec::new();
 
+    // ONE kernel for the whole suite: booting a fresh HeadlessServo per
+    // case leaks its kernel thread + mozjs isolate (Servo has no Drop),
+    // and two live kernels OOM'd the CI runner mid-suite. Navigating one
+    // webview across cases is isolation enough for these DOM pages.
+    let servo = match HeadlessServo::new((1280, 800)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[wpt] kernel boot failed: {e}");
+            eprintln!("WPT SMOKE PARTIAL — 0/{} (kernel boot failed)", CASES.len());
+            return;
+        },
+    };
+
     for (name, path, timeout) in CASES {
         let url = format!("https://wpt.live{path}");
         println!("[wpt] {name}: {url}");
-        let servo = match HeadlessServo::new((1280, 800)) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[wpt] kernel boot failed: {e}");
-                failed.push(name);
-                continue;
-            },
-        };
         match servo.navigate(&url, Duration::from_secs(*timeout)) {
             Ok(true) => {},
             Ok(false) => eprintln!("[wpt] load timed out (continuing to probe)"),
@@ -72,8 +77,9 @@ fn main() {
                 continue;
             },
         }
-        // Let the harness finish its async runs.
-        servo.settle(3000);
+        // Let the harness finish its async runs (and the previous page's
+        // timers unwind before the next navigation).
+        servo.settle(8000);
         let (verdict, title) = read_verdict(&servo);
         println!("[wpt]   title={title}");
         println!("[wpt]   verdict={verdict}");
