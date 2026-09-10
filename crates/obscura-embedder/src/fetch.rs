@@ -2,7 +2,7 @@
 //! the cdp_server kernel thread but with the CLI dump surface instead of a
 //! WS protocol. The kernel lives only as long as the request.
 
-use crate::page_dumps::dump_markdown;
+use crate::page_dumps::{dump_assets, dump_cookies, dump_html, dump_links, dump_markdown, dump_text};
 use crate::HeadlessServo;
 use std::sync::mpsc::channel;
 use std::time::Duration;
