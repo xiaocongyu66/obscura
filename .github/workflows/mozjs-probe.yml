@@ -41,9 +41,18 @@ jobs:
       - name: wpt.live connectivity probe (GET + kernel ladder)
         run: |
           getent hosts wpt.live || echo "DNS-FAIL wpt.live"
-          for u in "https://wpt.live/" "https://wpt.live/dom/collections/HTMLCollection-live.html" "https://example.com/"; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$u") || code="FAIL"
-            echo "curl GET $u -> $code"
+          for u in "https://wpt.live/" "https://example.com/" \
+                   "/dom/collections/HTMLCollection-live.html" \
+                   "/dom/nodes/Element-insertAdjacentElement.html" \
+                   "/dom/nodes/Element-closest.html" \
+                   "/dom/nodes/createElementNS.html" \
+                   "/dom/nodes/Node-cloneNode.html" \
+                   "/dom/events/Event-dispatch-click.html" \
+                   "/mutation-observer/MutationObserver-childList.html" \
+                   "/dom/nodes/ChildNode-after.html"; do
+            case "$u" in /*) full="https://wpt.live$u";; *) full="$u";; esac
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$full") || code="FAIL"
+            echo "curl GET $full -> $code"
           done
       - name: WPT smoke (curated DOM/event/selector cases)
         run: |

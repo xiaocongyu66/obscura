@@ -43,7 +43,11 @@ impl ServoHttpConnector {
     fn new() -> ServoHttpConnector {
         let mut inner = HyperHttpConnector::new();
         inner.enforce_http(false);
-        inner.set_happy_eyeballs_timeout(None);
+        // Happy Eyeballs stays ON (hyper-util default 300ms): v6-first DNS
+        // on a v4-only runner would otherwise hang the connect forever —
+        // wpt.live stalled exactly this way while curl (which races
+        // families) succeeded. Do NOT disable this again.
+        inner.set_happy_eyeballs_timeout(Some(Duration::from_millis(300)));
         inner.set_connect_timeout(Some(Duration::from_secs(pref!(network_connection_timeout))));
         ServoHttpConnector { inner }
     }
