@@ -37,7 +37,12 @@ fn main() {
         Ok(img) => *slot.borrow_mut() = Some(img),
         Err(e) => eprintln!("screenshot error: {e:?}"),
     });
+    let shot_start = std::time::Instant::now();
     let img = loop {
+        assert!(
+            shot_start.elapsed() < Duration::from_secs(90),
+            "screenshot callback never arrived within 90s (compositor stalled)"
+        );
         servo.spin();
         servo.render_frame();
         if let Some(img) = result.borrow_mut().take() {

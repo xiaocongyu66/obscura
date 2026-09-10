@@ -22,6 +22,7 @@ fn main() {
     // Drive the compositor while waiting for the official screenshot —
     // take_screenshot waits for rendering-up-to-date, and the compositor
     // only makes progress while the embedder pumps.
+    let start = std::time::Instant::now();
     let result: Rc<Cell<Option<image::RgbaImage>>> = Rc::new(Cell::new(None));
     let slot = result.clone();
     servo.webview().take_screenshot(None, move |res| {
@@ -31,6 +32,10 @@ fn main() {
         }
     });
     let img = loop {
+        assert!(
+            start.elapsed() < Duration::from_secs(90),
+            "screenshot callback never arrived within 90s (compositor stalled)"
+        );
         servo.spin();
         servo.render_frame();
         if let Some(img) = result.take() {

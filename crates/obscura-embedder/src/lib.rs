@@ -529,8 +529,12 @@ impl HeadlessServo {
             Ok(img) => *slot.borrow_mut() = Some(img),
             Err(e) => eprintln!("screenshot error: {e:?}"),
         });
-        let _ = deadline;
+        let start = Instant::now();
         let img = loop {
+            assert!(
+                start.elapsed() < deadline,
+                "screenshot_rgba_blocking: compositor did not produce a frame within {deadline:?}"
+            );
             self.spin();
             self.render_frame();
             if let Some(img) = result.borrow_mut().take() {
