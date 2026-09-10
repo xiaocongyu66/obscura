@@ -175,6 +175,7 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
     let (lifecycle_tx, lifecycle_rx) = channel::<String>();
     let (frame_tx, frame_rx) = channel::<String>();
     let (fetch_tx, fetch_rx) = channel::<String>();
+    let kernel_fetch_tx = fetch_tx.clone();
     std::thread::Builder::new()
         .name("servo-kernel".into())
         .spawn(move || {
@@ -341,14 +342,14 @@ fn spawn_kernel(viewport: (u32, u32)) -> Result<KernelHandle, String> {
                         if servo.fetch_fulfill(&request_id, status_code, headers, body) {
                             // The synthetic response is real data: emit the
                             // Network pair with it.
-                            let _ = fetch_tx.send(format!(
+                            let _ = kernel_fetch_tx.send(format!(
                                 "responseReceived\u{1f}{}",
                                 json!({
                                     "requestId": request_id,
                                     "response": { "status": status_code },
                                 })
                             ));
-                            let _ = fetch_tx.send(format!(
+                            let _ = kernel_fetch_tx.send(format!(
                                 "loadingFinished\u{1f}{}",
                                 json!({ "requestId": request_id })
                             ));
