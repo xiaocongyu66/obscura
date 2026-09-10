@@ -25,8 +25,9 @@ const CASES: &[(&str, &str, u64)] = &[
 fn read_verdict(servo: &HeadlessServo) -> (String, String) {
     // testharness exposes window.testharness_properties after completion;
     // fall back to parsing the inline status element.
-    let props = servo.evaluate_sync(
-        r#"(function() {
+    let props = servo
+        .evaluate_sync(
+            r#"(function() {
             if (window.testharness_properties) {
                 return JSON.stringify({
                     status: window.testharness_properties.status,
@@ -38,8 +39,9 @@ fn read_verdict(servo: &HeadlessServo) -> (String, String) {
             if (el) return JSON.stringify({ inline: el.textContent.slice(0, 200) });
             return JSON.stringify({ status: null, num_failed: -1, num_total: 0, note: 'no harness data' });
         })()"#,
-        Duration::from_secs(20),
-    );
+            Duration::from_secs(20),
+        )
+        .unwrap_or_else(|e| format!("{{\"note\":\"evaluate failed: {e}\"}}"));
     let title = servo
         .evaluate_sync("document.title", Duration::from_secs(10))
         .unwrap_or_default();
