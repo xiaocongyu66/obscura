@@ -80,6 +80,12 @@ fn main() {
         // Let the harness finish its async runs (and the previous page's
         // timers unwind before the next navigation).
         servo.settle(8000);
+        // Diagnose stalls: where did the webview actually land?
+        eprintln!(
+            "[wpt]   diag: url={:?} ready={:?}",
+            servo.current_url().map(|u| u.to_string()),
+            servo.evaluate_sync("document.readyState", Duration::from_secs(5)).unwrap_or_default(),
+        );
         let (verdict, title) = read_verdict(&servo);
         println!("[wpt]   title={title}");
         println!("[wpt]   verdict={verdict}");
