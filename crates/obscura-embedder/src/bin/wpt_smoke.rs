@@ -65,6 +65,21 @@ fn main() {
         },
     };
 
+    // Kernel-side navigation ladder: pinpoint WHERE https navigation
+    // stalls (simple site vs wpt.live domain) before burning the suite.
+    for (label, probe_url) in [
+        ("ladder example.com", "https://example.com/"),
+        ("ladder wpt.live root", "https://wpt.live/"),
+    ] {
+        println!("[wpt] {label}: {probe_url}");
+        let ok = servo.navigate(probe_url, Duration::from_secs(60)).unwrap_or(false);
+        eprintln!(
+            "[wpt]   {label}: ok={ok} url={:?} ready={:?}",
+            servo.current_url().map(|u| u.to_string()),
+            servo.evaluate_sync("document.readyState", Duration::from_secs(5)).unwrap_or_default(),
+        );
+    }
+
     for (name, path, timeout) in CASES {
         let url = format!("https://wpt.live{path}");
         println!("[wpt] {name}: {url}");
