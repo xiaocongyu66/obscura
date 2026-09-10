@@ -48,8 +48,12 @@ pub struct FetchState {
 
 impl FetchState {
     fn matches(&self, url: &str) -> bool {
-        !self.enabled
-            || self.patterns.is_empty()
+        // Interception OFF never holds loads. When ON: empty patterns
+        // intercept everything, otherwise substring-match any pattern.
+        if !self.enabled {
+            return false;
+        }
+        self.patterns.is_empty()
             || self.patterns.iter().any(|p| url.contains(p.as_str()))
     }
 }
