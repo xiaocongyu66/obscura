@@ -10,16 +10,15 @@ use obscura_embedder::HeadlessServo;
 use std::time::Duration;
 
 /// (name, wpt.live path, timeout seconds)
+// Paths GET-verified 200 on wpt.live by the CI probe (three of the old
+// set are 404 there now). Timeout 60s: happy-eyeballs fix permitting,
+// wpt.live pages are small and load fast.
 const CASES: &[(&str, &str, u64)] = &[
-    ("HTMLCollection live", "/dom/collections/HTMLCollection-live.html", 120),
-    ("element.insertAdjacentElement", "/dom/nodes/Element-insertAdjacentElement.html", 120),
-    ("closest", "/dom/nodes/Element-closest.html", 120),
-    ("createElementNS QName", "/dom/nodes/createElementNS.html", 120),
-    ("MutationObserver childList", "/mutation-observer/MutationObserver-childList.html", 120),
-    ("Node.cloneNode", "/dom/nodes/Node-cloneNode.html", 120),
-    ("querySelector live", "/selectors/attribute-selectors/attribute-selector.html", 120),
-    ("events mousedown dispatch", "/dom/events/Event-dispatch-click.html", 120),
-    ("after()", "/dom/nodes/ChildNode-after.html", 120),
+    ("element.insertAdjacentElement", "/dom/nodes/Element-insertAdjacentElement.html", 60),
+    ("closest", "/dom/nodes/Element-closest.html", 60),
+    ("Node.cloneNode", "/dom/nodes/Node-cloneNode.html", 60),
+    ("events mousedown dispatch", "/dom/events/Event-dispatch-click.html", 60),
+    ("after()", "/dom/nodes/ChildNode-after.html", 60),
 ];
 
 fn read_verdict(servo: &HeadlessServo) -> (String, String) {

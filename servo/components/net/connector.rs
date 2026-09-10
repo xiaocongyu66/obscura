@@ -294,7 +294,9 @@ impl Service<Destination> for ChromeHttpsConnector {
             // carry a TokioIo so the hyper Read/Write impls come from the
             // wrapper (btls SslStream only has tokio traits). The TLS
             // handshake wants the raw socket, hence into_inner().
+            log::debug!("chrome-connect: begin {scheme}://{host:?}");
             let tcp = http.call(dest).await?;
+            log::debug!("chrome-connect: tcp ok for {scheme}://{host:?}");
             if scheme.as_deref() != Some("https") {
                 return Ok(MaybeHttpsStream::Plain(tcp));
             }
@@ -310,7 +312,11 @@ impl Service<Destination> for ChromeHttpsConnector {
                 boring_tls::AlpnMode::Browser,
             )
             .await
-            .map_err(ConnectionError::TlsError)?;
+            .map_err(|e| {
+                log::debug!("chrome-connect: tls FAILED for {host}: {e:?}");
+                ConnectionError::TlsError(e)
+            })?;
+            log::debug!("chrome-connect: tls ok for {host}");
             Ok(MaybeHttpsStream::Https(TokioIo::new(stream)))
         })
     }
