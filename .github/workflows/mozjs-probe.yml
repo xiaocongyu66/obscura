@@ -34,6 +34,14 @@ jobs:
         run: |
           cargo build -p obscura-embedder --bin search_smoke 2>&1 | tail -5
           RUST_LOG=warn ./target/debug/search_smoke
+      - name: CF demo smoke (turnstile widget pipeline)
+        run: |
+          cargo build -p obscura-embedder --bin cf_demo 2>&1 | tail -5
+          RUST_LOG=warn ./target/debug/cf_demo
+      - name: WPT smoke (curated DOM/event/selector cases)
+        run: |
+          cargo build -p obscura-embedder --bin wpt_smoke 2>&1 | tail -5
+          RUST_LOG=warn ./target/debug/wpt_smoke
 
   probe:
     runs-on: ubuntu-24.04-arm
