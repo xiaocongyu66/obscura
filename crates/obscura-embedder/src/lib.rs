@@ -268,6 +268,12 @@ impl HeadlessServo {
         // (Bing, Cloudflare) treat as a bot signal. Present a Chrome UA —
         // and keep the TLS ClientHello on the same Chrome version as the UA.
         servo.set_preference("user_agent", servo::PrefValue::Str(profile.user_agent.clone()));
+        // :has() support ships with stylo but is pref-gated off; the WPT
+        // closest suite exercises ':has(> :scope)' so turn it on.
+        servo.set_preference(
+            "layout.css.has-selector.enabled",
+            servo::PrefValue::Boolean(true),
+        );
         if let Some(chrome_version) = profile
             .user_agent
             .split("Chrome/")
