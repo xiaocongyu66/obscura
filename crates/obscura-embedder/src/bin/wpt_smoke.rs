@@ -92,8 +92,13 @@ fn main() {
         return;
     }
 
+    // Base is switchable: wpt.live by default, or a local checkout served
+    // over http (the CI path — CF tarpits wpt.live from the runner: TLS ok,
+    // request out, response head 65s+ late on h1 and never on h2).
+    let base = std::env::var("OBSCURA_WPT_BASE")
+        .unwrap_or_else(|_| "https://wpt.live".into());
     for (name, path, timeout) in CASES {
-        let url = format!("https://wpt.live{path}");
+        let url = format!("{base}{path}");
         println!("[wpt] {name}: {url}");
         match servo.navigate(&url, Duration::from_secs(*timeout)) {
             Ok(true) => {},

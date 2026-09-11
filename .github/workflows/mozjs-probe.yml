@@ -54,10 +54,14 @@ jobs:
             code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$full") || code="FAIL"
             echo "curl GET $full -> $code"
           done
-      - name: WPT smoke (curated DOM/event/selector cases)
+      - name: WPT smoke (local checkout — CF tarpits wpt.live from runners)
         run: |
           cargo build -p obscura-embedder --bin wpt_smoke 2>&1 | tail -5
-          RUST_LOG=debug ./target/debug/wpt_smoke
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/web-platform-tests/wpt.git /tmp/wpt
+          cd /tmp/wpt && git sparse-checkout set resources dom mutation-observer events selectors && cd /
+          (cd /tmp/wpt && nohup python3 -m http.server 8999 >/tmp/wpt-server.log 2>&1 &) ; sleep 2
+          curl -s -o /dev/null -w "local wpt server: %{http_code}\n" "http://127.0.0.1:8999/dom/nodes/Element-closest.html"
+          OBSCURA_WPT_BASE=http://127.0.0.1:8999 RUST_LOG=info ./target/debug/wpt_smoke
       - name: h1 ladder probe (does HTTP/1.1 sidestep the wpt.live stall?)
         run: |
           OBSCURA_ALPN=http1 OBSCURA_WPT_LADDER_ONLY=1 RUST_LOG=debug ./target/debug/wpt_smoke 2>&1 | grep -E "\[wpt\]|chrome-connect|http-loader" | head -40
