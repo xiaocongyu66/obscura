@@ -57,7 +57,7 @@ jobs:
       - name: WPT smoke (curated DOM/event/selector cases)
         run: |
           cargo build -p obscura-embedder --bin wpt_smoke 2>&1 | tail -5
-          RUST_LOG=info ./target/debug/wpt_smoke
+          RUST_LOG=debug ./target/debug/wpt_smoke
 
   probe:
     runs-on: ubuntu-24.04-arm
