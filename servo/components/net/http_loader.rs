@@ -646,10 +646,12 @@ async fn obtain_response(
         .timing
         .set_attribute(ResourceAttribute::RequestStart);
 
+    log::debug!("http-loader: sending request (uri hidden) timing-pump live");
     let client_future = client
         .request(request)
         .and_then(move |res| {
             let send_end = CrossProcessInstant::now();
+            log::debug!("http-loader: response head received status={}", res.status());
 
             // TODO(#21271) response_start: immediately after receiving first byte of response
 
