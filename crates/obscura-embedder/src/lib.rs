@@ -272,7 +272,7 @@ impl HeadlessServo {
         // closest suite exercises ':has(> :scope)' so turn it on.
         servo.set_preference(
             "layout.css.has-selector.enabled",
-            servo::PrefValue::Boolean(true),
+            servo::PrefValue::Bool(true),
         );
         if let Some(chrome_version) = profile
             .user_agent
