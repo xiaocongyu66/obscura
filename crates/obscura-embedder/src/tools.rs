@@ -109,20 +109,29 @@ impl HeadlessServo {
         if !ok {
             return Err(format!("search page load did not complete ({query})"));
         }
-        // Result containers settle after load; give the page a beat.
-        for _ in 0..20 {
-            self.spin();
-            self.render_frame();
-            std::thread::sleep(std::time::Duration::from_millis(16));
-        }
-        let raw = self.evaluate_sync(extraction_js(engine), deadline)?;
-        if raw == "[]" {
-            return Err(format!(
-                "extraction empty; page url={:?} title={:?} body={:?}",
-                self.evaluate_sync("location.href", Duration::from_secs(10)).unwrap_or_default(),
-                self.evaluate_sync("document.title", Duration::from_secs(10)).unwrap_or_default(),
-                self.evaluate_sync("(document.body.innerText||'').slice(0,200)", Duration::from_secs(10)).unwrap_or_default(),
-            ));
+        // Result containers render late on some engine A/B slices (cn.bing
+        // schedules its result JS behind a timeout): poll the extraction
+        // until it yields rows or the poll budget runs out.
+        let mut raw = String::new();
+        let poll_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            for _ in 0..12 {
+                self.spin();
+                self.render_frame();
+                std::thread::sleep(std::time::Duration::from_millis(16));
+            }
+            raw = self.evaluate_sync(extraction_js(engine), deadline)?;
+            if raw != "[]" {
+                break;
+            }
+            if std::time::Instant::now() >= poll_deadline {
+                return Err(format!(
+                    "extraction empty after polling; page url={:?} title={:?} body={:?}",
+                    self.evaluate_sync("location.href", Duration::from_secs(10)).unwrap_or_default(),
+                    self.evaluate_sync("document.title", Duration::from_secs(10)).unwrap_or_default(),
+                    self.evaluate_sync("(document.body.innerText||'').slice(0,300)", Duration::from_secs(10)).unwrap_or_default(),
+                ));
+            }
         }
         let parsed: Value = serde_json::from_str(&raw)
             .map_err(|e| format!("extraction parse failed ({raw:.120}): {e}"))?;
