@@ -79,6 +79,23 @@ fn main() {
         );
     }
 
+    // h2-vs-h1 probe: fresh kernel with OBSCURA_ALPN=http1 (set here via
+    // a child re-exec is overkill — instead read it in-process before
+    // booting this kernel).
+    if std::env::var("OBSCURA_ALPN_H1_TEST").is_ok() {
+        std::env::set_var("OBSCURA_ALPN", "http1");
+        println!("[wpt] ladder wpt.live root (h1): https://wpt.live/");
+        let h1servo = HeadlessServo::new((1280, 800)).expect("h1 boot");
+        let ok = h1servo
+            .navigate("https://wpt.live/", Duration::from_secs(45))
+            .unwrap_or(false);
+        eprintln!(
+            "[wpt]   ladder wpt.live root (h1): ok={ok} url={:?} ready={:?}",
+            h1servo.current_url().map(|u| u.to_string()),
+            h1servo.evaluate_sync("document.readyState", Duration::from_secs(5)).unwrap_or_default(),
+        );
+    }
+
     for (name, path, timeout) in CASES {
         let url = format!("https://wpt.live{path}");
         println!("[wpt] {name}: {url}");

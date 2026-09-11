@@ -306,12 +306,19 @@ impl Service<Destination> for ChromeHttpsConnector {
                 .ok_or_else(|| ConnectionError::TlsError("destination has no host".into()))?;
             let connector = boring_tls::build_ssl_connector(&tls_config)
                 .map_err(|e| ConnectionError::TlsError(format!("TLS context: {e:?}")))?;
+            // OBSCURA_ALPN=http1 forces HTTP/1.1 for this connection — the
+            // h2-vs-h1 switch for diagnosing stalls like wpt.live's
+            // request-sent-but-no-response-head case.
+            let alpn_mode = match std::env::var("OBSCURA_ALPN").as_deref() {
+                Ok("http1") => boring_tls::AlpnMode::Http1Only,
+                _ => boring_tls::AlpnMode::Browser,
+            };
             let stream = boring_tls::connect_tls(
                 &connector,
                 &host,
                 tcp.into_inner(),
                 chrome_version,
-                boring_tls::AlpnMode::Browser,
+                alpn_mode,
             )
             .await
             .map_err(|e| {
