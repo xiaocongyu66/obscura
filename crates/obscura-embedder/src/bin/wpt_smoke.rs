@@ -66,10 +66,18 @@ fn main() {
 
     // Kernel-side navigation ladder: pinpoint WHERE https navigation
     // stalls (simple site vs wpt.live domain) before burning the suite.
+    // With OBSCURA_ALPN=http1 the whole binary runs h1 — the ladder then
+    // answers "does http/1.1 sidestep the wpt.live stall".
+    let alpn_tag = if std::env::var("OBSCURA_ALPN").as_deref() == Ok("http1") {
+        " (h1)"
+    } else {
+        ""
+    };
     for (label, probe_url) in [
         ("ladder example.com", "https://example.com/"),
         ("ladder wpt.live root", "https://wpt.live/"),
     ] {
+        let label = format!("{label}{alpn_tag}");
         println!("[wpt] {label}: {probe_url}");
         let ok = servo.navigate(probe_url, Duration::from_secs(60)).unwrap_or(false);
         eprintln!(
@@ -79,21 +87,9 @@ fn main() {
         );
     }
 
-    // h2-vs-h1 probe: fresh kernel with OBSCURA_ALPN=http1 (set here via
-    // a child re-exec is overkill — instead read it in-process before
-    // booting this kernel).
-    if std::env::var("OBSCURA_ALPN_H1_TEST").is_ok() {
-        std::env::set_var("OBSCURA_ALPN", "http1");
-        println!("[wpt] ladder wpt.live root (h1): https://wpt.live/");
-        let h1servo = HeadlessServo::new((1280, 800)).expect("h1 boot");
-        let ok = h1servo
-            .navigate("https://wpt.live/", Duration::from_secs(45))
-            .unwrap_or(false);
-        eprintln!(
-            "[wpt]   ladder wpt.live root (h1): ok={ok} url={:?} ready={:?}",
-            h1servo.current_url().map(|u| u.to_string()),
-            h1servo.evaluate_sync("document.readyState", Duration::from_secs(5)).unwrap_or_default(),
-        );
+    if std::env::var("OBSCURA_WPT_LADDER_ONLY").is_ok() {
+        println!("[wpt] LADDER_ONLY set — skipping suite");
+        return;
     }
 
     for (name, path, timeout) in CASES {
