@@ -118,7 +118,22 @@ fn main() {
             servo.current_url().map(|u| u.to_string()),
             servo.evaluate_sync("document.readyState", Duration::from_secs(5)).unwrap_or_default(),
         );
-        let (verdict, title) = read_verdict(&servo);
+        // Diagnose harness wiring: did testharness.js load and start?
+    let wire = servo
+        .evaluate_sync(
+            r#"JSON.stringify({
+                th: typeof window.testharness_properties,
+                add_ran: typeof window.add_result_callback,
+                scripts: Array.from(document.querySelectorAll('script[src]')).map(s => s.getAttribute('src')).slice(0, 5),
+                resultsEl: !!document.querySelector('#__testharness__results__'),
+                bodyLen: (document.body ? document.body.innerText.length : 0),
+                bodyHead: (document.body ? document.body.innerText.slice(0, 120) : ''),
+            })"#,
+            Duration::from_secs(10),
+        )
+        .unwrap_or_default();
+    eprintln!("[wpt]   wire={wire}");
+    let (verdict, title) = read_verdict(&servo);
         println!("[wpt]   title={title}");
         println!("[wpt]   verdict={verdict}");
         let v: serde_json::Value = serde_json::from_str(&verdict).unwrap_or(serde_json::Value::Null);
