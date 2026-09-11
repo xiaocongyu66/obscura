@@ -61,6 +61,7 @@ jobs:
           cd /tmp/wpt && git sparse-checkout set resources dom mutation-observer events selectors && cd /
           (cd /tmp/wpt && nohup python3 -m http.server 8999 >/tmp/wpt-server.log 2>&1 &) ; sleep 2
           curl -s -o /dev/null -w "local wpt server: %{http_code}\n" "http://127.0.0.1:8999/dom/nodes/Element-closest.html"
+          cd "$GITHUB_WORKSPACE"
           OBSCURA_WPT_BASE=http://127.0.0.1:8999 RUST_LOG=info ./target/debug/wpt_smoke
       - name: h1 ladder probe (does HTTP/1.1 sidestep the wpt.live stall?)
         run: |
