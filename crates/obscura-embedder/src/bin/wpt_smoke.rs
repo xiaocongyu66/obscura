@@ -22,21 +22,22 @@ const CASES: &[(&str, &str, u64)] = &[
 ];
 
 fn read_verdict(servo: &HeadlessServo) -> (String, String) {
-    // testharness exposes window.testharness_properties after completion;
-    // fall back to parsing the inline status element.
+    // The harness renders its own Summary table into the document
+    // ("Harness status: OK ... Found N tests ... M Fail"); read those.
+    // window.testharness_properties is NOT a thing; the report UI is.
     let props = servo
         .evaluate_sync(
             r#"(function() {
-            if (window.testharness_properties) {
-                return JSON.stringify({
-                    status: window.testharness_properties.status,
-                    num_failed: (window.testharness_properties.tests || []).filter(t => t.status !== 0).length,
-                    num_total: (window.testharness_properties.tests || []).length,
-                });
+            var text = (document.body ? document.body.innerText : '');
+            var m = text.match(/Found (\d+) tests/);
+            var f = text.match(/(\d+) Fail/);
+            var statusOk = /Harness status: OK/.test(text);
+            if (m) {
+                var total = parseInt(m[1], 10);
+                var failed = f ? parseInt(f[1], 10) : (statusOk ? 0 : -1);
+                return JSON.stringify({ status: statusOk ? 0 : 1, num_failed: failed, num_total: total });
             }
-            var el = document.querySelector('#__testharness__results__');
-            if (el) return JSON.stringify({ inline: el.textContent.slice(0, 200) });
-            return JSON.stringify({ status: null, num_failed: -1, num_total: 0, note: 'no harness data' });
+            return JSON.stringify({ status: null, num_failed: -1, num_total: 0, note: 'no summary' });
         })()"#,
             Duration::from_secs(20),
         )
