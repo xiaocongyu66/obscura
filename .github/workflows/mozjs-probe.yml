@@ -60,7 +60,7 @@ jobs:
           RUST_LOG=debug ./target/debug/wpt_smoke
       - name: h1 ladder probe (does HTTP/1.1 sidestep the wpt.live stall?)
         run: |
-          OBSCURA_ALPN=http1 OBSCURA_WPT_LADDER_ONLY=1 RUST_LOG=debug ./target/debug/wpt_smoke 2>&1 | grep -E "ladder|h1" | head -6
+          OBSCURA_ALPN=http1 OBSCURA_WPT_LADDER_ONLY=1 RUST_LOG=debug ./target/debug/wpt_smoke 2>&1 | grep -E "\[wpt\]|chrome-connect|http-loader" | head -40
 
   probe:
     runs-on: ubuntu-24.04-arm
