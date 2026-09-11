@@ -137,6 +137,24 @@ fn main() {
     let (verdict, title) = read_verdict(&servo);
         println!("[wpt]   title={title}");
         println!("[wpt]   verdict={verdict}");
+        // Name the failing subtests from the rendered Details table.
+        let failing = servo
+            .evaluate_sync(
+                r#"(function() {
+                var out = [];
+                var rows = document.querySelectorAll('table tr');
+                for (var i = 0; i < rows.length; i++) {
+                    var t = (rows[i].innerText || '').trim();
+                    if (/^Fail/.test(t)) out.push(t.replace(/\s+/g, ' ').slice(0, 140));
+                }
+                return JSON.stringify(out.slice(0, 5));
+            })()"#,
+                Duration::from_secs(10),
+            )
+            .unwrap_or_default();
+        if failing != "[]" {
+            eprintln!("[wpt]   failing={failing}");
+        }
         let v: serde_json::Value = serde_json::from_str(&verdict).unwrap_or(serde_json::Value::Null);
         let num_failed = v["num_failed"].as_i64().unwrap_or(-1);
         let status = v["status"].as_i64();
