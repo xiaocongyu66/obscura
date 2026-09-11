@@ -64,8 +64,18 @@ fn extraction_js(engine: SearchEngine) -> &'static str {
         SearchEngine::Bing => r#"
 (function(){
   var out = [];
-  document.querySelectorAll('#b_results > li.b_algo').forEach(function(li){
-    var a = li.querySelector('h2 a');
+  // cn.bing's zh-CN layout stopped rendering li.b_algo for some A/B slices;
+  // match the result id loosely and fall back to every h2 link in it.
+  var items = document.querySelectorAll('#b_results > li.b_algo, #b_results > li[class*=b_algo]');
+  if (!items.length) items = document.querySelectorAll('#b_results h2 a').map ? [] : [];
+  if (!items.length) {
+    document.querySelectorAll('#b_results h2 a').forEach(function(a){
+      out.push({title: (a.innerText||'').trim(), url: a.href||'', snippet: ''});
+    });
+    return JSON.stringify(out.slice(0, 10));
+  }
+  items.forEach(function(li){
+    var a = li.querySelector('h2 a') || li.querySelector('a[href]');
     if (!a) return;
     var sn = li.querySelector('.b_caption p, .b_algoSlug, p');
     out.push({title: (a.innerText||'').trim(), url: a.href||'', snippet: (sn?sn.innerText:'').trim()});
