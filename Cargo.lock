@@ -5652,9 +5652,11 @@ name = "obscura-embedder"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "cookie 0.18.2",
  "dpi",
  "euclid",
  "futures-util",
+ "http 1.4.2",
  "image",
  "keyboard-types",
  "log",
