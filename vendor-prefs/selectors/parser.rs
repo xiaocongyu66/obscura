@@ -543,6 +543,7 @@ impl<Impl: SelectorImpl> SelectorList<Impl> {
         Self::parse_with_state(
             parser,
             input,
+            SelectorParsingState::DISALLOW_PSEUDOS,
             ForgivingParsing::No,
             parse_relative,
         )
@@ -629,6 +630,7 @@ where
     parse_selector(
         parser,
         input,
+        state | SelectorParsingState::DISALLOW_PSEUDOS | SelectorParsingState::DISALLOW_COMBINATORS,
         ParseRelative::No,
     )
 }
@@ -3280,6 +3282,7 @@ where
         input,
         state
             | SelectorParsingState::SKIP_DEFAULT_NAMESPACE
+            | SelectorParsingState::DISALLOW_PSEUDOS,
         ForgivingParsing::No,
         ParseRelative::No,
     )?;
@@ -3417,6 +3420,7 @@ where
         input,
         state
             | SelectorParsingState::SKIP_DEFAULT_NAMESPACE
+            | SelectorParsingState::DISALLOW_PSEUDOS,
         ForgivingParsing::Yes,
         ParseRelative::No,
     )?;
@@ -3442,6 +3446,9 @@ where
     // Note: The spec defines ":has-allowed pseudo-element," but there's no
     // pseudo-element defined as such at the moment.
     // https://w3c.github.io/csswg-drafts/selectors-4/#has-allowed-pseudo-element
+    // Per the Selectors spec the inner list of :has() may contain
+    // pseudo-classes (:scope anchors the relative selector); only NESTED
+    // :has() is disallowed. Do NOT set DISALLOW_PSEUDOS here.
     let inner = SelectorList::parse_with_state(
         parser,
         input,
@@ -3533,6 +3540,7 @@ where
         input,
         state
             | SelectorParsingState::SKIP_DEFAULT_NAMESPACE
+            | SelectorParsingState::DISALLOW_PSEUDOS,
         ForgivingParsing::No,
         ParseRelative::No,
     )?;
@@ -3630,6 +3638,7 @@ where
                 // :has/:is/:where/:not (DISALLOW_PSEUDOS).
                 // - Non-element backed pseudos do not allow other pseudos to follow (AFTER_NON_ELEMENT_BACKED_PSEUDO)...
                 // - ... except ::before and ::after, which allow _some_ pseudos.
+                if state.intersects(SelectorParsingState::DISALLOW_PSEUDOS)
                     || (state.intersects(SelectorParsingState::AFTER_NON_ELEMENT_BACKED_PSEUDO)
                         && !state.intersects(SelectorParsingState::AFTER_BEFORE_OR_AFTER_PSEUDO))
                 {
