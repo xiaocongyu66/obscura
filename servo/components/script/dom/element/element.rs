@@ -37,7 +37,7 @@ use script_bindings::codegen::GenericBindings::KeyframeEffectBinding::KeyframeEf
 use script_bindings::dom::UnrootedDom;
 use script_bindings::reflector::DomObject;
 use selectors::attr::CaseSensitivity;
-use selectors::matching::ElementSelectorFlags;
+use selectors::matching::{ElementSelectorFlags, element_closest_for_closest};
 use selectors::sink::Push;
 use servo_arc::Arc as ServoArc;
 use style::applicable_declarations::ApplicableDeclarationBlock;
@@ -3975,7 +3975,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         let closest_element = with_layout_state(|| {
             #[expect(unsafe_code)]
             let layout_element: LayoutDom<'_, _> = unsafe { traced_self.to_layout() };
-            dom_apis::element_closest(
+            element_closest_for_closest(
                 ServoDangerousStyleElement::from(layout_element.upcast()),
                 &selectors,
                 quirks_mode,

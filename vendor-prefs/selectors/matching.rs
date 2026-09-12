@@ -1611,4 +1611,50 @@ where
     }
 
     index
+
+
+/// Fixed element_closest for Element.closest() that properly handles :scope in :has().
+/// This implements the DOM spec requirement: "The :scope pseudo-class must match
+/// the element on which the method was called."
+/// See https://dom.spec.whatwg.org/#dom-element-closest
+pub fn element_closest_for_closest<E>(
+    element: E,
+    selector_list: &SelectorList<E::Impl>,
+    quirks_mode: QuirksMode,
+) -> Option<E>
+where
+    E: Element,
+{
+    let mut selector_caches = SelectorCaches::default();
+
+    let mut context = MatchingContext::new(
+        MatchingMode::Normal,
+        None,
+        &mut selector_caches,
+        quirks_mode,
+        NeedsSelectorFlags::No,
+        MatchingForInvalidation::No,
+    );
+    // The original element on which closest() was called.
+    // This is used as :scope for relative selectors inside :has().
+    // See https://dom.spec.whatwg.org/#dom-element-closest
+    let closest_scope = element.opaque();
+    context.scope_element = Some(closest_scope);
+    context.closest_scope = Some(closest_scope);
+    context.current_host = element.containing_shadow_host().map(|e| e.opaque());
+
+    let mut current = Some(element);
+    while let Some(element) = current.take() {
+        // For each ancestor, update scope_element to that ancestor (for top-level :scope)
+        // but keep closest_scope for relative selectors inside :has().
+        context.scope_element = Some(element.opaque());
+        if matches_selector_list(selector_list, &element, &mut context).to_bool(true) {
+            return Some(element);
+        }
+        current = element.parent_element();
+    }
+
+    None
+}
+
 }

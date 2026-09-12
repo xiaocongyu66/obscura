@@ -421,6 +421,7 @@ stylo_static_prefs = { path = "vendor-prefs/stylo-static-prefs" }
 # :has() parsed its inner list with DISALLOW_PSEUDOS, rejecting ':scope'
 # ('has(> :scope)' is valid per spec and the WPT closest suite exercises
 # it). Vendored selectors drops that flag from the :has inner-parse state.
+# Also provides element_closest_for_closest with proper :scope handling for closest().
 selectors = { path = "vendor-prefs/selectors" }
 
 [profile.release]
