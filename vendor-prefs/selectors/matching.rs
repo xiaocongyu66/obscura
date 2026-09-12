@@ -1649,7 +1649,7 @@ where
         // For each ancestor, update scope_element to that ancestor (for top-level :scope)
         // but keep closest_scope for relative selectors inside :has().
         context.scope_element = Some(element.opaque());
-        if matches_selector_list(selector_list, &element, &mut context).to_bool(true) {
+        if matches_selector_list(selector_list, &element, &mut context) == KleeneValue::True {
             return Some(element);
         }
         current = element.parent_element();
