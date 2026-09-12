@@ -482,9 +482,12 @@ where
             self.current_relative_selector_anchor.is_none(),
             "Nesting should've been rejected at parse time"
         );
+        let original_scope = self.scope_element;
         self.current_relative_selector_anchor = Some(anchor);
+        self.scope_element = Some(anchor);
         let result = self.nest(f);
         self.current_relative_selector_anchor = None;
+        self.scope_element = original_scope;
         result
     }
 
