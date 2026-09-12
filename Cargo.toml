@@ -41,7 +41,7 @@ members = [
     "servo/components/hyper_serde",
     "servo/components/servo_tracing",
     "servo/components/wakelock",
-]
+    ]
 
 [workspace.lints.clippy]
 manual_string_new = "deny"
@@ -290,6 +290,7 @@ string_cache = "0.9"
 strum = { version = "0.28", features = ["derive"] }
 stylo = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f30125e27a8fb897a709c5e" }
 stylo_atoms = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f30125e27a8fb897a709c5e" }
+dom = { workspace = true }
 stylo_dom = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f30125e27a8fb897a709c5e" }
 stylo_malloc_size_of = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f30125e27a8fb897a709c5e" }
 stylo_static_prefs = { git = "https://github.com/servo/stylo", rev = "b3e6425100df710c7f30125e27a8fb897a709c5e" }

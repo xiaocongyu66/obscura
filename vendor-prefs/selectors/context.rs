@@ -151,6 +151,11 @@ where
     /// See https://drafts.csswg.org/selectors-4/#scope-pseudo
     pub scope_element: Option<OpaqueElement>,
 
+    /// The original element from Element.closest(), used as :scope for
+    /// relative selectors inside :has() during closest() matching.
+    /// See https://dom.spec.whatwg.org/#dom-element-closest
+    pub closest_scope: Option<OpaqueElement>,
+
     /// The current shadow host we're collecting :host rules for.
     pub current_host: Option<OpaqueElement>,
 
@@ -484,7 +489,11 @@ where
         );
         let original_scope = self.scope_element;
         self.current_relative_selector_anchor = Some(anchor);
-        self.scope_element = Some(anchor);
+        // For Element.closest(), :scope in relative selectors inside :has()
+        // should refer to the original element (which element_closest sets as
+        // scope_element before the ancestor loop), not the anchor.
+        // See https://dom.spec.whatwg.org/#dom-element-closest
+        self.scope_element = self.closest_scope.or(original_scope).or(Some(anchor));
         let result = self.nest(f);
         self.current_relative_selector_anchor = None;
         self.scope_element = original_scope;
