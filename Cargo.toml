@@ -412,10 +412,6 @@ xpath = { package = "servo-xpath", path = "servo/components/xpath" }
 # Local fix: btls-sys prefix_symbols applies objcopy per archive member
 # (archive-wide objcopy --redefine-syms is a silent no-op on CI).
 btls-sys = { path = "crates/btls-sys-patch" }
-# :has() ships pref-gated off in stylo's static prefs; the WPT closest
-# suite needs ':has(> :scope)'. Patch the toml default instead of vendoring
-# the whole crate (its build.rs regenerates the prefs table from this file).
-stylo_static_prefs = { path = "vendor-prefs/stylo-static-prefs" }
 
 [patch."https://github.com/servo/stylo"]
 # :has() parsed its inner list with DISALLOW_PSEUDOS, rejecting ':scope'
@@ -423,6 +419,13 @@ stylo_static_prefs = { path = "vendor-prefs/stylo-static-prefs" }
 # it). Vendored selectors drops that flag from the :has inner-parse state.
 # Also provides element_closest_for_closest with proper :scope handling for closest().
 selectors = { path = "vendor-prefs/selectors" }
+# :has() ships pref-gated off in stylo's static prefs
+# (style/servo/selector_parser.rs reads layout.css.has-selector.enabled via
+# static_prefs::pref!). This patch MUST live in this URL group: the dep comes
+# from the stylo git source, so a [patch.crates-io] entry is silently ignored
+# by cargo. Patching the toml default avoids vendoring the whole style crate
+# (its build.rs regenerates the prefs table from this file).
+stylo_static_prefs = { path = "vendor-prefs/stylo-static-prefs" }
 
 [profile.release]
 panic = "unwind"
