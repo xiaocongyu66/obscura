@@ -1612,6 +1612,7 @@ where
 
     index
 
+}
 
 /// Fixed element_closest for Element.closest() that properly handles :scope in :has().
 /// This implements the DOM spec requirement: "The :scope pseudo-class must match
@@ -1657,4 +1658,3 @@ where
     None
 }
 
-}
