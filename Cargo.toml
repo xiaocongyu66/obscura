@@ -416,5 +416,11 @@ btls-sys = { path = "crates/btls-sys-patch" }
 # the whole crate (its build.rs regenerates the prefs table from this file).
 stylo_static_prefs = { path = "vendor-prefs/stylo-static-prefs" }
 
+[patch."https://github.com/servo/stylo"]
+# :has() parsed its inner list with DISALLOW_PSEUDOS, rejecting ':scope'
+# ('has(> :scope)' is valid per spec and the WPT closest suite exercises
+# it). Vendored selectors drops that flag from the :has inner-parse state.
+selectors = { path = "vendor-prefs/selectors" }
+
 [profile.release]
 panic = "unwind"
