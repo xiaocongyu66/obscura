@@ -411,6 +411,10 @@ xpath = { package = "servo-xpath", path = "servo/components/xpath" }
 # Local fix: btls-sys prefix_symbols applies objcopy per archive member
 # (archive-wide objcopy --redefine-syms is a silent no-op on CI).
 btls-sys = { path = "crates/btls-sys-patch" }
+# :has() ships pref-gated off in stylo's static prefs; the WPT closest
+# suite needs ':has(> :scope)'. Patch the toml default instead of vendoring
+# the whole crate (its build.rs regenerates the prefs table from this file).
+stylo_static_prefs = { path = "vendor-prefs/stylo-static-prefs" }
 
 [profile.release]
 panic = "unwind"
