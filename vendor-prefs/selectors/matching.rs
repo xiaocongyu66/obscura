@@ -1316,8 +1316,8 @@ where
                     KleeneValue::from(!context.shared.in_negation())
                 };
             }
-            match context.shared.scope_element {
-                Some(ref scope_element) => element.opaque() == *scope_element,
+            match context.shared.closest_scope.or(context.shared.scope_element) {
+                Some(scope_element) => element.opaque() == scope_element,
                 None => element.is_root(),
             }
         },
@@ -1646,9 +1646,6 @@ where
 
     let mut current = Some(element);
     while let Some(element) = current.take() {
-        // For each ancestor, update scope_element to that ancestor (for top-level :scope)
-        // but keep closest_scope for relative selectors inside :has().
-        context.scope_element = Some(element.opaque());
         if matches_selector_list(selector_list, &element, &mut context) {
             return Some(element);
         }
