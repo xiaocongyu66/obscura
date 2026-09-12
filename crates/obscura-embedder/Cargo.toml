@@ -7,7 +7,7 @@ repository.workspace = true
 
 [dependencies]
 cookie = { workspace = true }
-servo = { path = "../../servo/components/servo", default-features = false, features = ["bundled"] }
+servo = { path = "../../servo/components/servo", default-features = false, features = ["bundled", "webcrypto"] }
 url.workspace = true
 dpi.workspace = true
 euclid.workspace = true
