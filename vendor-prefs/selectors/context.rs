@@ -292,6 +292,7 @@ where
             pseudo_element_matching_fn: None,
             extra_data: Default::default(),
             current_relative_selector_anchor: None,
+            closest_scope: None,
             selector_caches,
             _impl: ::std::marker::PhantomData,
         }
