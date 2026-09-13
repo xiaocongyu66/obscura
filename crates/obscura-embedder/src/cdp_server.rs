@@ -465,11 +465,9 @@ async fn handle_connection(
     // HTTP probe endpoints (Chrome-compatible): /json/version lets CDP
     // clients poll for readiness, /json lists targets. Peek without
     // consuming so real WebSocket upgrades proceed untouched.
-    let peeked_head: String;
     {
         let mut probe = [0u8; 512];
         let n = stream.peek(&mut probe).await.unwrap_or(0);
-        peeked_head = String::from_utf8_lossy(&probe[..n]).replace('\r', " ").replace('\n', " | ");
         let head = &probe[..n];
         if head.starts_with(b"GET /json/version") {
             let body = format!(
@@ -495,11 +493,9 @@ async fn handle_connection(
         }
     }
 
-    eprintln!("[cdp] conn peeked: {}", &peeked_head[..peeked_head.len().min(64)]);
     let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(WebSocketConfig::default()))
         .await
         .map_err(|e| format!("ws accept: {e}"))?;
-    eprintln!("[cdp] ws established");
 
     // Session state per connection (flatten CDP: one synthetic session id).
     let session_id = "servo-session-1";
@@ -508,10 +504,6 @@ async fn handle_connection(
 
     use futures_util::{SinkExt, StreamExt};
     while let Some(msg) = ws.next().await {
-        eprintln!(
-            "[cdp] raw: {:?}",
-            msg.as_ref().map(|m| m.to_string().chars().take(100).collect::<String>())
-        );
         // Drain pending console messages and forward them as CDP events.
         // The kernel thread stays busy only while commands run, so this is
         // opportunistic: events flush when the client is active (which is
@@ -1194,7 +1186,6 @@ async fn handle_connection(
         };
 
         let out = serde_json::to_string(&response).map_err(|e| e.to_string())?;
-        eprintln!("[cdp] -> {}", out.chars().take(120).collect::<String>());
         ws.send(tokio_tungstenite::tungstenite::Message::text(out))
             .await
             .map_err(|e| format!("ws write: {e}"))?;

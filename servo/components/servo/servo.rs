@@ -1084,8 +1084,13 @@ impl Servo {
         let filter = max(env_logger.filter(), con_logger.filter());
         let logger = BothLogger(env_logger, con_logger);
 
-        log::set_boxed_logger(Box::new(logger)).expect("Failed to set logger.");
-        log::set_max_level(filter);
+        // The embedder may have installed its own logger already (e.g. the
+        // obscura CLI wires up tracing before booting the kernel). A second
+        // set_boxed_logger errors — keep the embedder's logger, just raise
+        // the level so kernel logs still flow.
+        if log::set_boxed_logger(Box::new(logger)).is_ok() {
+            log::set_max_level(filter);
+        }
     }
 
     pub fn create_memory_report(&self, snd: GenericCallback<MemoryReportResult>) {
