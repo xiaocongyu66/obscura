@@ -448,6 +448,7 @@ pub async fn serve(host: &str, port: u16, viewport: (u32, u32)) -> Result<(), St
     loop {
         let (stream, _peer) = listener.accept().await.map_err(|e| e.to_string())?;
         let kernel = kernel.clone();
+        let listen_url = listen_url.clone();
         tokio::spawn(async move {
             let _ = handle_connection(stream, kernel, &listen_url).await;
         });
