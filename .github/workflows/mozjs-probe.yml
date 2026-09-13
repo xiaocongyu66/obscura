@@ -69,6 +69,8 @@ jobs:
           print("SERVE-PROBE OK — flatten CDP live, UA:", ua[:60])
           PY
           pkill -f "obscura serve --port 9277" || true
+          echo "── serve log tail ──"
+          tail -40 /tmp/serve.log || true
       - name: upload obscura binary (for local e2e on arm64)
         uses: actions/upload-artifact@v4
         with:
