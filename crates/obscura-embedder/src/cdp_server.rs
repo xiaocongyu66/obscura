@@ -454,9 +454,45 @@ pub async fn serve(host: &str, port: u16, viewport: (u32, u32)) -> Result<(), St
 }
 
 async fn handle_connection(
-    stream: tokio::net::TcpStream,
+    mut stream: tokio::net::TcpStream,
     kernel: Arc<KernelHandle>,
 ) -> Result<(), String> {
+    // HTTP probe endpoints (Chrome-compatible): /json/version lets CDP
+    // clients poll for readiness, /json lists targets. Peek without
+    // consuming so real WebSocket upgrades proceed untouched.
+    {
+        use tokio::io::AsyncReadExt;
+        let mut probe = [0u8; 512];
+        let n = stream.peek(&mut probe).await.unwrap_or(0);
+        let head = &probe[..n];
+        if head.starts_with(b"GET /json/version") {
+            let addr_str = stream
+                .peer_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|_| "127.0.0.1:9222".to_string());
+            let body = format!(
+                "{{\"Browser\":\"obscura/servo\",\"Protocol-Version\":\"1.3\",\
+                  \"User-Agent\":\"obscura-embedder\",\
+                  \"webSocketDebuggerUrl\":\"ws://{addr_str}/devtools/browser\"}}"
+            );
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            use tokio::io::AsyncWriteExt;
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return Ok(());
+        }
+        if head.starts_with(b"GET /json") {
+            let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                        Content-Length: 2\r\nConnection: close\r\n\r\n[]";
+            use tokio::io::AsyncWriteExt;
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return Ok(());
+        }
+    }
+
     let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(WebSocketConfig::default()))
         .await
         .map_err(|e| format!("ws accept: {e}"))?;

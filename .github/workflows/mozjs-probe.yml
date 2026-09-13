@@ -22,6 +22,45 @@ jobs:
         run: cargo check -p obscura-embedder --message-format=short 2>&1 | tail -120
       - name: cargo check obscura-cli (self-engine removal)
         run: cargo check -p obscura-cli --message-format=short 2>&1 | tail -120
+      - name: serve probe (json/version + flatten CDP over WS)
+        run: |
+          cargo build -p obscura-cli 2>&1 | tail -3
+          (RUST_LOG=warn ./target/debug/obscura serve --port 9277 --proxy http://127.0.0.1:1 >/tmp/serve.log 2>&1 &)
+          for i in $(seq 1 30); do curl -s --max-time 2 http://127.0.0.1:9277/json/version | grep -q obscura && break; sleep 1; done
+          curl -s http://127.0.0.1:9277/json/version
+          curl -s -o /dev/null -w " /json/list=%{http_code}\n" http://127.0.0.1:9277/json/list
+          python3 - <<'PY'
+          import base64, json, os, socket, struct
+          s = socket.create_connection(("127.0.0.1", 9277), timeout=20)
+          key = base64.b64encode(os.urandom(16)).decode()
+          s.sendall((f"GET /devtools/browser HTTP/1.1\r\nHost: 127.0.0.1:9277\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+          hdr = b""
+          while b"\r\n\r\n" not in hdr: hdr += s.recv(4096)
+          assert b"101" in hdr.split(b"\r\n")[0], hdr[:200]
+          def send(method, params, mid):
+              payload = json.dumps({"id": mid, "method": method, "params": params}).encode()
+              mask = os.urandom(4)
+              hdr2 = bytes([0x81])
+              n = len(payload)
+              hdr2 += bytes([0x80 | (7 if n < 126 else 0)] + ([] if n < 126 else [126, n >> 8, n & 0xFF]))
+              s.sendall(hdr2 + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+          def recv(mid):
+              while True:
+                  b1, b2 = struct.unpack("BB", s.recv(2))
+                  ln = b2 & 0x7F
+                  if ln == 126: ln = struct.unpack(">H", s.recv(2))[0]
+                  elif ln == 127: ln = struct.unpack(">Q", s.recv(8))[0]
+                  data = b""
+                  while len(data) < ln: data += s.recv(ln - len(data))
+                  msg = json.loads(data)
+                  if msg.get("id") == mid: return msg
+          send("Target.createTarget", {"url": "about:blank"}, 1); print("createTarget:", recv(1)["result"]["targetId"][:8])
+          send("Target.attachToTarget", {"targetId": "x", "flatten": True}, 2); print("attach sessionId:", recv(2)["result"]["sessionId"])
+          send("Runtime.evaluate", {"expression": "navigator.userAgent", "returnByValue": True}, 3)
+          ua = recv(3)["result"]["result"]["value"]
+          print("SERVE-PROBE OK — flatten CDP live, UA:", ua[:60])
+          PY
+          pkill -f "obscura serve --port 9277" || true
       - name: runtime smoke (boot + navigate + screenshot)
         run: |
           cargo build -p obscura-embedder --bin smoke 2>&1 | tail -5

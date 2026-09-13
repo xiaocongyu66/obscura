@@ -213,10 +213,15 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve { port, host } => {
             print_banner(*port);
             if let Some(proxy) = &global_proxy {
+                url::Url::parse(proxy)
+                    .map_err(|e| anyhow::anyhow!("invalid proxy url: {e}"))?;
+                // Servo's Preferences::default() picks these up when the
+                // kernel boots; its ProxyConnector then tunnels via
+                // HTTP CONNECT (basic auth included in the URL).
+                std::env::set_var("http_proxy", proxy);
+                std::env::set_var("https_proxy", proxy);
                 tracing::info!("Proxy: {proxy}");
             }
-            // The kernel owns the fingerprint (UA pool + Chrome TLS); proxy
-            // support lands with the kernel network stack's proxy plumbing.
             obscura_embedder::cdp_server::serve(host, *port, (1280, 800))
                 .await
                 .map_err(|e| anyhow::anyhow!("CDP server failed: {e}"))
