@@ -451,7 +451,7 @@ pub async fn serve(host: &str, port: u16, viewport: (u32, u32)) -> Result<(), St
         let listen_url = listen_url.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, kernel, &listen_url).await {
-                log::warn!("cdp connection ended: {e}");
+                eprintln!("[cdp] connection ended: {e}");
             }
         });
     }
@@ -505,9 +505,10 @@ async fn handle_connection(
 
     use futures_util::{SinkExt, StreamExt};
     while let Some(msg) = ws.next().await {
-        if let Ok(tokio_tungstenite::tungstenite::Message::Text(t)) = &msg {
-            eprintln!("[cdp] <- {}", t.chars().take(120).collect::<String>());
-        }
+        eprintln!(
+            "[cdp] raw: {:?}",
+            msg.as_ref().map(|m| m.to_string().chars().take(100).collect::<String>())
+        );
         // Drain pending console messages and forward them as CDP events.
         // The kernel thread stays busy only while commands run, so this is
         // opportunistic: events flush when the client is active (which is
