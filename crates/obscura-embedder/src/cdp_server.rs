@@ -494,9 +494,11 @@ async fn handle_connection(
         }
     }
 
+    eprintln!("[cdp] conn peeked: {}", String::from_utf8_lossy(&probe[..n.min(48)]).replace('\r', " ").replace('\n', " | "));
     let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(WebSocketConfig::default()))
         .await
         .map_err(|e| format!("ws accept: {e}"))?;
+    eprintln!("[cdp] ws established");
 
     // Session state per connection (flatten CDP: one synthetic session id).
     let session_id = "servo-session-1";
