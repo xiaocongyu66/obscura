@@ -472,7 +472,7 @@ async fn handle_connection(
             let body = format!(
                 "{{\"Browser\":\"obscura/servo\",\"Protocol-Version\":\"1.3\",\
                   \"User-Agent\":\"obscura-embedder\",\
-                  \"webSocketDebuggerUrl\":\"ws://{listen}/devtools/browser\"}}"
+                  \"webSocketDebuggerUrl\":\"{listen}/devtools/browser\"}}"
             );
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
