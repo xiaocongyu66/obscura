@@ -465,10 +465,11 @@ async fn handle_connection(
     // HTTP probe endpoints (Chrome-compatible): /json/version lets CDP
     // clients poll for readiness, /json lists targets. Peek without
     // consuming so real WebSocket upgrades proceed untouched.
+    let peeked_head: String;
     {
-        use tokio::io::AsyncReadExt;
         let mut probe = [0u8; 512];
         let n = stream.peek(&mut probe).await.unwrap_or(0);
+        peeked_head = String::from_utf8_lossy(&probe[..n]).replace('\r', " ").replace('\n', " | ");
         let head = &probe[..n];
         if head.starts_with(b"GET /json/version") {
             let body = format!(
@@ -494,7 +495,7 @@ async fn handle_connection(
         }
     }
 
-    eprintln!("[cdp] conn peeked: {}", String::from_utf8_lossy(&probe[..n.min(48)]).replace('\r', " ").replace('\n', " | "));
+    eprintln!("[cdp] conn peeked: {}", &peeked_head[..peeked_head.len().min(64)]);
     let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(WebSocketConfig::default()))
         .await
         .map_err(|e| format!("ws accept: {e}"))?;
