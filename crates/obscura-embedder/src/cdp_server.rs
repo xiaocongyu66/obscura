@@ -505,6 +505,9 @@ async fn handle_connection(
 
     use futures_util::{SinkExt, StreamExt};
     while let Some(msg) = ws.next().await {
+        if let Ok(tokio_tungstenite::tungstenite::Message::Text(t)) = &msg {
+            eprintln!("[cdp] <- {}", t.chars().take(120).collect::<String>());
+        }
         // Drain pending console messages and forward them as CDP events.
         // The kernel thread stays busy only while commands run, so this is
         // opportunistic: events flush when the client is active (which is
@@ -1187,6 +1190,7 @@ async fn handle_connection(
         };
 
         let out = serde_json::to_string(&response).map_err(|e| e.to_string())?;
+        eprintln!("[cdp] -> {}", out.chars().take(120).collect::<String>());
         ws.send(tokio_tungstenite::tungstenite::Message::text(out))
             .await
             .map_err(|e| format!("ws write: {e}"))?;
