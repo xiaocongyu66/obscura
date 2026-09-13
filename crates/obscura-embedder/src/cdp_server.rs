@@ -444,11 +444,12 @@ pub async fn serve(host: &str, port: u16, viewport: (u32, u32)) -> Result<(), St
         .map_err(|e| format!("bind {addr}: {e}"))?;
     log::info!("Servo CDP server on ws://{addr}/devtools/browser");
 
+    let listen_url = format!("ws://{addr}");
     loop {
         let (stream, _peer) = listener.accept().await.map_err(|e| e.to_string())?;
         let kernel = kernel.clone();
         tokio::spawn(async move {
-            let _ = handle_connection(stream, kernel).await;
+            let _ = handle_connection(stream, kernel, &listen_url).await;
         });
     }
 }
@@ -456,6 +457,7 @@ pub async fn serve(host: &str, port: u16, viewport: (u32, u32)) -> Result<(), St
 async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     kernel: Arc<KernelHandle>,
+    listen: &str,
 ) -> Result<(), String> {
     // HTTP probe endpoints (Chrome-compatible): /json/version lets CDP
     // clients poll for readiness, /json lists targets. Peek without
@@ -466,14 +468,10 @@ async fn handle_connection(
         let n = stream.peek(&mut probe).await.unwrap_or(0);
         let head = &probe[..n];
         if head.starts_with(b"GET /json/version") {
-            let addr_str = stream
-                .peer_addr()
-                .map(|a| a.to_string())
-                .unwrap_or_else(|_| "127.0.0.1:9222".to_string());
             let body = format!(
                 "{{\"Browser\":\"obscura/servo\",\"Protocol-Version\":\"1.3\",\
                   \"User-Agent\":\"obscura-embedder\",\
-                  \"webSocketDebuggerUrl\":\"ws://{addr_str}/devtools/browser\"}}"
+                  \"webSocketDebuggerUrl\":\"ws://{listen}/devtools/browser\"}}"
             );
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
