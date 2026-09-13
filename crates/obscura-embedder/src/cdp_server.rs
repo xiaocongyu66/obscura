@@ -450,7 +450,9 @@ pub async fn serve(host: &str, port: u16, viewport: (u32, u32)) -> Result<(), St
         let kernel = kernel.clone();
         let listen_url = listen_url.clone();
         tokio::spawn(async move {
-            let _ = handle_connection(stream, kernel, &listen_url).await;
+            if let Err(e) = handle_connection(stream, kernel, &listen_url).await {
+                log::warn!("cdp connection ended: {e}");
+            }
         });
     }
 }
