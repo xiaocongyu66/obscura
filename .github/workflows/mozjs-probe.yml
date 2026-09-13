@@ -61,6 +61,12 @@ jobs:
           print("SERVE-PROBE OK — flatten CDP live, UA:", ua[:60])
           PY
           pkill -f "obscura serve --port 9277" || true
+      - name: upload obscura binary (for local e2e on arm64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: obscura-servo-arm64
+          path: target/debug/obscura
+          if-no-files-found: error
       - name: runtime smoke (boot + navigate + screenshot)
         run: |
           cargo build -p obscura-embedder --bin smoke 2>&1 | tail -5

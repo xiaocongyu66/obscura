@@ -218,8 +218,12 @@ async fn main() -> anyhow::Result<()> {
                 // Servo's Preferences::default() picks these up when the
                 // kernel boots; its ProxyConnector then tunnels via
                 // HTTP CONNECT (basic auth included in the URL).
-                std::env::set_var("http_proxy", proxy);
-                std::env::set_var("https_proxy", proxy);
+                // Safety: called once during CLI startup, before the tokio
+                // runtime spawns any threads that could read the env.
+                unsafe {
+                    std::env::set_var("http_proxy", proxy);
+                    std::env::set_var("https_proxy", proxy);
+                }
                 tracing::info!("Proxy: {proxy}");
             }
             obscura_embedder::cdp_server::serve(host, *port, (1280, 800))
