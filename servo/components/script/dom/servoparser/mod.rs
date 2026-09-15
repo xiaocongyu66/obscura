@@ -64,7 +64,7 @@ use crate::dom::bindings::settings_stack::is_execution_stack_empty;
 use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::characterdata::CharacterData;
 use crate::dom::comment::Comment;
-use crate::dom::csp::{Violation, parse_csp_list_from_metadata};
+use crate::dom::csp::Violation;
 use crate::dom::customelementregistry::{CustomElementReactionStack, CustomElementRegistry};
 use crate::dom::document::{Document, HasBrowsingContext, IsHTMLDocument};
 use crate::dom::documentfragment::DocumentFragment;
@@ -1007,7 +1007,11 @@ impl ParserContext {
         // Step 7. Return result.
         PolicyContainer {
             // Step 3. Set result's CSP list to the result of parsing a response's Content Security Policies given response.
-            csp_list: parse_csp_list_from_metadata(&metadata.headers),
+            // obscura: automation/stealth — never enforce page CSP (the Chrome
+            // setBypassCSP equivalent). x.ai's nonce'd CSP was blocking Next.js
+            // hydration inline scripts in the kernel; a headless automation
+            // kernel gains nothing from honoring it.
+            csp_list: None,
             // TODO Step 4. If environment is non-null, then set result's embedder policy to the
             // result of obtaining an embedder policy given response and environment.
             // Otherwise, set it to "unsafe-none".
