@@ -1199,7 +1199,11 @@ impl GlobalScope {
             &mut *self.message_port_state.borrow_mut()
         {
             let (message_buffer, dom_port) = match message_ports.get_mut(port_id) {
-                None => panic!("start_message_port called on a unknown port."),
+                // The port was shipped to another global (worker or a new
+                // document); the stale endpoint is disentangled and starting
+                // it is a no-op per spec. Panicking here killed whole pages
+                // (Next.js ships MessagePorts around aggressively).
+                None => return warn!("start_message_port called on an unknown (likely shipped) port."),
                 Some(managed_port) => {
                     if let Some(port_impl) = managed_port.port_impl.as_mut() {
                         (port_impl.start(), managed_port.dom_port.as_rooted())
