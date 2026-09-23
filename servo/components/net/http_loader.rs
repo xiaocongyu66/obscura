@@ -1568,6 +1568,10 @@ async fn http_network_or_cache_fetch(
         }
     }
 
+    // All request headers are final here (cookies, auth, client hints) —
+    // rewrite into Chrome's wire order for the HPACK/h2 fingerprint.
+    canonicalize_header_order(&mut http_request.headers);
+
     // TODO(#33616) Step 8.22 If there’s a proxy-authentication entry, use it as appropriate.
     let should_wait = {
         // Enter critical section on cache entry.
@@ -2822,6 +2826,43 @@ fn append_a_request_origin_header(request: &mut Request) {
 
         // Step 4.2. Append (`Origin`, serializedOrigin) to request’s header list.
         request.headers.typed_insert(serialized_origin);
+    }
+}
+
+/// Rewrite the request header list into Chrome's wire order. Header order
+/// feeds HTTP/2 fingerprints (HPACK stream layout), and hyper writes headers
+/// in HeaderMap insertion order — assembling them in spec order does not
+/// match what Chrome puts on the wire. Headers not in the canonical list
+/// keep their relative order after the known ones.
+fn canonicalize_header_order(headers: &mut HeaderMap) {
+    const CHROME_ORDER: &[HeaderName] = &[
+        header::CONTENT_TYPE,
+        HeaderName::from_static("sec-ch-ua"),
+        HeaderName::from_static("sec-ch-ua-mobile"),
+        HeaderName::from_static("sec-ch-ua-platform"),
+        HeaderName::from_static("upgrade-insecure-requests"),
+        header::USER_AGENT,
+        header::ACCEPT,
+        header::ORIGIN,
+        HeaderName::from_static("sec-fetch-site"),
+        HeaderName::from_static("sec-fetch-mode"),
+        HeaderName::from_static("sec-fetch-dest"),
+        HeaderName::from_static("sec-fetch-user"),
+        header::REFERER,
+        header::ACCEPT_ENCODING,
+        header::ACCEPT_LANGUAGE,
+        header::COOKIE,
+        header::AUTHORIZATION,
+    ];
+    let mut taken = std::mem::take(headers);
+    for name in CHROME_ORDER {
+        while let Some(value) = taken.remove(name) {
+            headers.append(name, value);
+        }
+    }
+    // Preserve any headers the canonical list does not know about.
+    for (name, value) in taken {
+        headers.append(name, value);
     }
 }
 

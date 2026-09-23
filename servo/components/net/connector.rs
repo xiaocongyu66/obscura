@@ -712,12 +712,14 @@ pub fn create_http_client(tls_config: TlsConfig) -> ServoClient {
     let connector = ChromeHttpsConnector::new(tls_config);
 
     Client::builder(TokioExecutor {})
-        // Chrome's flow-control windows: SETTINGS_INITIAL_WINDOW_SIZE 6291456
-        // and a connection window of 15663105. hyper's defaults (65535 both)
-        // are the classic non-browser h2 fingerprint outlier — Cloudflare's
-        // edge hashes these frames and challenged every kernel POST from
+        // Chrome's flow-control windows: SETTINGS_INITIAL_WINDOW_SIZE 6291456,
+        // and a connection window totaling 15MB — Chrome wires that as a
+        // WINDOW_UPDATE increment of 15663105 over the 65535 default, so the
+        // absolute size here is 15728640. hyper's defaults (65535 both) are
+        // the classic non-browser h2 fingerprint outlier — Cloudflare's edge
+        // hashes these frames and challenged every kernel POST from
         // accounts.x.ai while curl-impersonate-class clients passed.
         .http2_initial_stream_window_size(6_291_456)
-        .http2_initial_connection_window_size(15_663_105)
+        .http2_initial_connection_window_size(15_728_640)
         .build(InstrumentedConnector::new(connector))
 }
