@@ -2835,7 +2835,7 @@ fn append_a_request_origin_header(request: &mut Request) {
 /// match what Chrome puts on the wire. Headers not in the canonical list
 /// keep their relative order after the known ones.
 fn canonicalize_header_order(headers: &mut HeaderMap) {
-    const CHROME_ORDER: &[HeaderName] = &[
+    let chrome_order = [
         header::CONTENT_TYPE,
         HeaderName::from_static("sec-ch-ua"),
         HeaderName::from_static("sec-ch-ua-mobile"),
@@ -2855,14 +2855,17 @@ fn canonicalize_header_order(headers: &mut HeaderMap) {
         header::AUTHORIZATION,
     ];
     let mut taken = std::mem::take(headers);
-    for name in CHROME_ORDER {
+    for name in &chrome_order {
         while let Some(value) = taken.remove(name) {
             headers.append(name, value);
         }
     }
-    // Preserve any headers the canonical list does not know about.
+    // Preserve any headers the canonical list does not know about. HeaderMap
+    // iteration yields Option<&HeaderName> (None for multi-value continuations).
     for (name, value) in taken {
-        headers.append(name, value);
+        if let Some(name) = name {
+            headers.append(name, value);
+        }
     }
 }
 
