@@ -1095,13 +1095,20 @@ impl XMLHttpRequest {
     ) -> ErrorResult {
         match status {
             Ok(()) => {
-                // Diagnostic: the x.ai signup POST comes back as something the
-                // page cannot JSON.parse. Log method, final URL, status and the
-                // first bytes of the body so the bad payload is visible without
-                // a full network stack rebuild.
+                // Diagnostic for the x.ai action responses, opt-in only: the
+                // body can contain session identifiers, so never log it in
+                // normal use. Set OBSCURA_XHR_TRACE=1 to enable.
                 if let Some(url) = self.request_url.borrow().as_ref() {
                     let url_string = url.url().into_string();
-                    if url_string.contains("accounts.x.ai") {
+                    let host_matches = url
+                        .url()
+                        .host_str()
+                        .is_some_and(|h| h == "accounts.x.ai");
+                    if host_matches &&
+                        std::env::var("OBSCURA_XHR_TRACE")
+                            .map(|v| v == "1")
+                            .unwrap_or(false)
+                    {
                         let body = self.response.borrow();
                         let head: String = body.iter().take(160).map(|b| char::from(*b)).collect();
                         warn!(

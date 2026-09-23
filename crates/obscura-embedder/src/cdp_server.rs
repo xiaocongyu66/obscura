@@ -493,6 +493,45 @@ async fn handle_connection(
         }
     }
 
+    // Cross-site WebSocket hijacking guard (same defense Chrome's Host
+    // check provides): a browser-initiated WS request always carries an
+    // Origin header and cannot fake the loopback Host. Legitimate CDP
+    // clients send neither. Reject before the handshake completes.
+    {
+        let mut probe = [0u8; 2048];
+        let n = stream.peek(&mut probe).await.unwrap_or(0);
+        let head = String::from_utf8_lossy(&probe[..n]);
+        let mut host_ok = true;
+        let mut origin_seen = false;
+        for line in head.lines() {
+            let lower = line.to_ascii_lowercase();
+            if let Some(v) = lower.strip_prefix("origin:") {
+                if !v.trim().is_empty() {
+                    origin_seen = true;
+                }
+            } else if let Some(v) = lower.strip_prefix("host:") {
+                let host_val = v.trim();
+                let host = if let Some(rest) = host_val.strip_prefix('[') {
+                    // [::1]:9222 — take up to the closing bracket
+                    rest.split(']').next().unwrap_or(rest)
+                } else {
+                    host_val.rsplit(':').next().unwrap_or(host_val)
+                };
+                if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+                    host_ok = false;
+                }
+            }
+        }
+        if origin_seen || !host_ok {
+            eprintln!("[cdp] rejected handshake: origin_seen={origin_seen} host_ok={host_ok}");
+            use tokio::io::AsyncWriteExt;
+            let _ = stream
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+            return Ok(());
+        }
+    }
+
     let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(WebSocketConfig::default()))
         .await
         .map_err(|e| format!("ws accept: {e}"))?;
@@ -809,7 +848,7 @@ async fn handle_connection(
             "Page.startScreencast" => {
                 let every_ms = params["everyNthFrame"]
                     .as_u64()
-                    .map(|n| n * 100)
+                    .map(|n| n.saturating_mul(100))
                     .unwrap_or(200)
                     .clamp(100, 2000);
                 reply_to_response(
@@ -975,7 +1014,9 @@ async fn handle_connection(
                 }
             },
             "Input.humanGesture" => {
-                let pts = params["points"].as_array().ok_or("points required")?;
+                let Some(pts) = params["points"].as_array() else {
+                    return error_response(id, "humanGesture: points required");
+                };
                 let mut points = Vec::with_capacity(pts.len());
                 for p in pts {
                     let x = p.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
@@ -992,7 +1033,9 @@ async fn handle_connection(
                 }))
             },
             "Input.humanType" => {
-                let text = params["text"].as_str().ok_or("text required")?.to_string();
+                let Some(text) = params["text"].as_str().map(|s| s.to_string()) else {
+                    return error_response(id, "humanType: text required");
+                };
                 let delays: Vec<u64> = params["delays"]
                     .as_array()
                     .map(|a| a.iter().filter_map(|d| d.as_u64()).collect())
@@ -1099,10 +1142,9 @@ async fn handle_connection(
                 error_response(id, "DOM.setFileInputFiles: not supported by the Servo kernel yet")
             },
             "Page.addScriptToEvaluateOnNewDocument" => {
-                let source = params["source"]
-                    .as_str()
-                    .ok_or("source required")?
-                    .to_string();
+                let Some(source) = params["source"].as_str().map(|s| s.to_string()) else {
+                    return error_response(id, "addScriptToEvaluateOnNewDocument: source required");
+                };
                 reply_to_response(id, kernel.call(KernelCmd::AddInitScript(source)))
             },
             "Network.enable" | "Network.disable" | "Network.setCacheDisabled"
