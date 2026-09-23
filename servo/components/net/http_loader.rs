@@ -1517,6 +1517,16 @@ async fn http_network_or_cache_fetch(
 
     let current_url = http_request.current_url();
 
+    // Chrome always sends the client-hint trio + Accept-Language on every
+    // request. A Chrome UA with no sec-ch-ua headers is a textbook bot signal
+    // — Cloudflare's edge challenged every POST from accounts.x.ai until
+    // these were present. Derived from the UA so the hints stay coherent
+    // with the impersonated Chrome version.
+    if current_url.scheme() == "https" {
+        set_default_client_hints(&mut http_request.headers, &context.user_agent);
+        net_traits::set_default_accept_language(&mut http_request.headers);
+    }
+
     // Step 8.21: If includeCredentials is true, then:
     // TODO some of this step can't be implemented yet
     if include_credentials {
@@ -2815,9 +2825,50 @@ fn append_a_request_origin_header(request: &mut Request) {
     }
 }
 
+/// Append the `sec-ch-ua` client-hint request headers derived from the
+/// session UA, mirroring Chrome's brands/platform formatting per version
+/// line (matching the vendored fingerprint profile formats). No-ops when
+/// the request already carries them or the UA is not a Chrome UA.
+fn set_default_client_hints(headers: &mut HeaderMap, user_agent: &str) {
+    if headers.contains_key("sec-ch-ua") {
+        return;
+    }
+    let Some(version) = user_agent
+        .split("Chrome/")
+        .nth(1)
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|v| v.parse::<u32>().ok())
+    else {
+        return;
+    };
+    let v = version.to_string();
+    let ch_ua = if version >= 131 {
+        format!("\"Google Chrome\";v=\"{v}\", \"Chromium\";v=\"{v}\", \"Not_A Brand\";v=\"24\"")
+    } else if version >= 124 {
+        format!("\"Chromium\";v=\"{v}\", \"Google Chrome\";v=\"{v}\", \"Not-A.Brand\";v=\"99\"")
+    } else {
+        format!("\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"{v}\", \"Google Chrome\";v=\"{v}\"")
+    };
+    let platform = if user_agent.contains("Macintosh") {
+        "\"macOS\""
+    } else if user_agent.contains("Windows") {
+        "\"Windows\""
+    } else {
+        "\"Linux\""
+    };
+    for (name, value) in [
+        ("sec-ch-ua", ch_ua),
+        ("sec-ch-ua-mobile", "?0".to_string()),
+        ("sec-ch-ua-platform", platform.to_string()),
+    ] {
+        if let Ok(value) = HeaderValue::from_str(&value) {
+            headers.insert(name, value);
+        }
+    }
+}
+
 /// <https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-append-the-fetch-metadata-headers-for-a-request>
-fn append_the_fetch_metadata_headers(r: &mut Request) {
-    // Step 1. If r’s url is not an potentially trustworthy URL, return.
+fn append_the_fetch_metadata_headers(r: &mut Request) {    // Step 1. If r’s url is not an potentially trustworthy URL, return.
     if !r.url().is_potentially_trustworthy() {
         return;
     }
