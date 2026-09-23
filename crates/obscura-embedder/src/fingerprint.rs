@@ -32,7 +32,15 @@ pub fn random_profile() -> Option<UaProfile> {
         .map(|d| d.subsec_nanos() as usize)
         .unwrap_or(0)
         ^ (std::process::id() as usize);
-    let ua = CHROME_USER_AGENTS[seed % CHROME_USER_AGENTS.len()];
+    // Datacenter exits + an X11 Linux UA is a near-certain CF WAF block
+    // ("Sorry, you have been blocked") — observed 3/4 blocked vs 0/3 for
+    // Windows/macOS on the same IP. Draw only from the desktop slice.
+    let desktop: Vec<&str> = CHROME_USER_AGENTS
+        .iter()
+        .copied()
+        .filter(|ua| !ua.contains("X11; Linux"))
+        .collect();
+    let ua = desktop[seed % desktop.len()];
     from_ua(ua)
 }
 
