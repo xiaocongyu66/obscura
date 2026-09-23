@@ -1014,41 +1014,45 @@ async fn handle_connection(
                 }
             },
             "Input.humanGesture" => {
-                let Some(pts) = params["points"].as_array() else {
-                    return error_response(id, "humanGesture: points required");
-                };
-                let mut points = Vec::with_capacity(pts.len());
-                for p in pts {
-                    let x = p.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                    let y = p.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                    let d = p.get(2).and_then(|v| v.as_u64()).unwrap_or(10);
-                    points.push((x, y, d));
+                match params["points"].as_array() {
+                    None => error_response(id, "humanGesture: points required"),
+                    Some(pts) => {
+                        let mut points = Vec::with_capacity(pts.len());
+                        for p in pts {
+                            let x = p.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            let y = p.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            let d = p.get(2).and_then(|v| v.as_u64()).unwrap_or(10);
+                            points.push((x, y, d));
+                        }
+                        reply_to_response(id, kernel.call(KernelCmd::HumanGesture {
+                            points,
+                            press: params["press"].as_bool().unwrap_or(false),
+                            press_delay_ms: params["pressDelayMs"].as_u64().unwrap_or(80),
+                            x: params["x"].as_f64().unwrap_or(0.0) as f32,
+                            y: params["y"].as_f64().unwrap_or(0.0) as f32,
+                        }))
+                    }
                 }
-                reply_to_response(id, kernel.call(KernelCmd::HumanGesture {
-                    points,
-                    press: params["press"].as_bool().unwrap_or(false),
-                    press_delay_ms: params["pressDelayMs"].as_u64().unwrap_or(80),
-                    x: params["x"].as_f64().unwrap_or(0.0) as f32,
-                    y: params["y"].as_f64().unwrap_or(0.0) as f32,
-                }))
             },
             "Input.humanType" => {
-                let Some(text) = params["text"].as_str().map(|s| s.to_string()) else {
-                    return error_response(id, "humanType: text required");
-                };
-                let delays: Vec<u64> = params["delays"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|d| d.as_u64()).collect())
-                    .unwrap_or_default();
-                reply_to_response(id, kernel.call(KernelCmd::HumanType {
-                    text,
-                    delays,
-                    focus_expr: params["focusExpr"]
-                        .as_str()
-                        .unwrap_or("document.activeElement")
-                        .to_string(),
-                    clear: params["clear"].as_bool().unwrap_or(false),
-                }))
+                match params["text"].as_str().map(|s| s.to_string()) {
+                    None => error_response(id, "humanType: text required"),
+                    Some(text) => {
+                        let delays: Vec<u64> = params["delays"]
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|d| d.as_u64()).collect())
+                            .unwrap_or_default();
+                        reply_to_response(id, kernel.call(KernelCmd::HumanType {
+                            text,
+                            delays,
+                            focus_expr: params["focusExpr"]
+                                .as_str()
+                                .unwrap_or("document.activeElement")
+                                .to_string(),
+                            clear: params["clear"].as_bool().unwrap_or(false),
+                        }))
+                    }
+                }
             },
             "Page.reload" => reply_to_response(id, kernel.call(KernelCmd::Reload)),
             "Page.navigateToHistoryEntry" => {
@@ -1142,10 +1146,10 @@ async fn handle_connection(
                 error_response(id, "DOM.setFileInputFiles: not supported by the Servo kernel yet")
             },
             "Page.addScriptToEvaluateOnNewDocument" => {
-                let Some(source) = params["source"].as_str().map(|s| s.to_string()) else {
-                    return error_response(id, "addScriptToEvaluateOnNewDocument: source required");
-                };
-                reply_to_response(id, kernel.call(KernelCmd::AddInitScript(source)))
+                match params["source"].as_str().map(|s| s.to_string()) {
+                    None => error_response(id, "addScriptToEvaluateOnNewDocument: source required"),
+                    Some(source) => reply_to_response(id, kernel.call(KernelCmd::AddInitScript(source))),
+                }
             },
             "Network.enable" | "Network.disable" | "Network.setCacheDisabled"
             | "Network.setRequestInterception" | "Network.setBlockedURLs" => {
