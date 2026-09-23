@@ -1100,14 +1100,14 @@ impl XMLHttpRequest {
                 // first bytes of the body so the bad payload is visible without
                 // a full network stack rebuild.
                 if let Some(url) = self.request_url.borrow().as_ref() {
-                    let url_str = url.url().as_str();
-                    if url_str.contains("accounts.x.ai") {
+                    let url_string = url.url().into_string();
+                    if url_string.contains("accounts.x.ai") {
                         let body = self.response.borrow();
                         let head: String = body.iter().take(160).map(|b| char::from(*b)).collect();
                         warn!(
                             "xhr done {} {} status={} body[0..]={}",
                             self.request_method.borrow(),
-                            url_str,
+                            url_string,
                             self.status.borrow().raw_code(),
                             head
                         );
