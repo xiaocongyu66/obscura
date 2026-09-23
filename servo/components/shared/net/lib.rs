@@ -1294,7 +1294,15 @@ pub fn get_current_locale() -> &'static (String, HeaderValue) {
     CURRENT_LOCALE.get_or_init(|| {
         let locale_override = servo_config::pref!(intl_locale_override);
         let locale = if locale_override.is_empty() {
-            sys_locale::get_locale().unwrap_or_else(|| "en-US".into())
+            // The embedder resolves the exit-IP geo before serve starts and
+            // exports OBSCURA_LOCALE (e.g. en-US for a BR exit). Prefer it so
+            // Accept-Language stays coherent with the egress country — a
+            // host-locale header from a foreign IP is a cheap CF tell.
+            std::env::var("OBSCURA_LOCALE").ok().filter(|l| {
+                !l.is_empty() && HeaderValue::from_str(l).is_ok()
+            }).unwrap_or_else(|| {
+                sys_locale::get_locale().unwrap_or_else(|| "en-US".into())
+            })
         } else {
             locale_override
         };
